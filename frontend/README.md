@@ -38,25 +38,25 @@ All analytics are computed client-side.
 
 ### Landing Page
 
-![Landing](frontend/screenshots/landing.png)
+![Landing](frontend/screenshots/landing.jpeg)
 
 ---
 
 ### Learning Modules
 
-![Modules](frontend/screenshots/modules.png)
+![Modules](frontend/screenshots/modules.jpeg)
 
 ---
 
 ### Test Interface
 
-![Test](frontend/screenshots/test.png)
+![Test](frontend/screenshots/test.jpeg)
 
 ---
 
 ### Progress & Analytics Dashboard
 
-![Progress](frontend/screenshots/progress.png)
+![Progress](frontend/screenshots/progress.jpeg)
 
 ---
 
