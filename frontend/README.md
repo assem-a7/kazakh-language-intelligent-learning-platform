@@ -1,16 +1,128 @@
-# React + Vite
+# QazaqAI — Adaptive Kazakh Language Learning Platform
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Intelligent web-based learning system for structured Kazakh language acquisition with topic-level analytics and adaptive feedback.
 
-Currently, two official plugins are available:
+---
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## 📌 Overview
 
-## React Compiler
+QazaqAI is a client-side adaptive learning platform designed to support systematic Kazakh language learning through:
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- Vocabulary modules
+- Grammar lessons
+- Auto-checked exercises
+- Topic-based testing
+- Personal analytics dashboard
 
-## Expanding the ESLint configuration
+The system tracks user performance by topic, calculates accuracy metrics, and provides structured feedback based on rule-based adaptive logic.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+---
+
+## 🧠 Core Idea
+
+Instead of random exercises, the platform:
+
+- Aggregates attempts by topic (`category_id`)
+- Calculates topic accuracy (correct / total)
+- Tracks streak (daily engagement)
+- Measures average response time
+- Provides performance breakdown per module
+- Generates participant ID for research tracking
+- Allows JSON export of anonymized learning data
+
+All analytics are computed client-side.
+
+---
+
+## 📸 Screenshots
+
+### Landing Page
+
+![Landing](frontend/screenshots/landing.png)
+
+---
+
+### Learning Modules
+
+![Modules](frontend/screenshots/modules.png)
+
+---
+
+### Test Interface
+
+![Test](frontend/screenshots/test.png)
+
+---
+
+### Progress & Analytics Dashboard
+
+![Progress](frontend/screenshots/progress.png)
+
+---
+
+## 🎯 Key Features
+
+- Topic-based accuracy tracking
+- Rule-based adaptive recommendations
+- Daily streak calculation
+- Average response time analytics
+- Topic performance table
+- JSON export for research analysis
+- Unified warm UI design system
+- Fully client-side architecture (no backend required)
+
+---
+
+## 🏗 Architecture
+
+### Frontend
+- React (Vite)
+- Component-based SPA
+- View-based navigation system
+- Local state management
+
+### Data Layer
+- CSV-based dataset
+- Topic mapping via `category_id`
+- localStorage for attempts persistence
+
+### Analytics Layer
+- Topic aggregation
+- Accuracy percentage calculation
+- Response-time measurement
+- Participant ID generation
+- Data export module
+
+---
+
+## 🔬 Adaptive Logic Model
+
+The system uses a rule-based personalization strategy:
+
+- If topic accuracy < 50% → recommended review
+- If response time is high → suggest repetition
+- Topics with 0 attempts remain muted in analytics
+- Accuracy color coding:
+  - ≥ 70% — green
+  - ≥ 50% — amber
+  - < 50% — red
+
+This provides interpretable and transparent personalization.
+
+---
+
+📊 Research & Future Work
+
+The platform is designed as a research prototype for intelligent educational systems.
+
+Possible future extensions:
+
+Machine-learning based personalization
+
+Cloud-based storage
+
+User authentication
+
+NLP-driven grammar feedback
+
+Performance prediction modeling.
