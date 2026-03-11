@@ -78,12 +78,12 @@ function GrammarCard({ rule, index, isInView }) {
         borderRadius: 13,
         overflow: "hidden",
         boxShadow: open ? `0 4px 18px rgba(120,80,20,.10)` : "0 1px 5px rgba(120,80,20,.05)",
-        transition2: "border-color .2s, box-shadow .2s",
       }}
       className="grammar-card"
     >
       {/* Header row */}
       <button
+        className="grammar-card-btn"
         onClick={() => setOpen(o => !o)}
         style={{
           width:"100%", textAlign:"left", padding:"1rem 1.15rem",
@@ -202,6 +202,9 @@ export default function GrammarView({ onBack, onExit }) {
         @media (min-width:480px) { .grammar-cat-badge { display:inline-flex !important; } }
         .g-search-input::placeholder { color: #b09070; }
         .g-search-input { outline: none; }
+        .g-search-wrap:focus-within { border-color: rgba(200,136,10,.42) !important; box-shadow: 0 0 0 3px rgba(200,136,10,.12) !important; }
+        .g-clear-btn:focus-visible { outline: 2px solid rgba(200,136,10,.5); outline-offset: 2px; border-radius: 4px; }
+        .grammar-card-btn:focus-visible { outline: 2px solid rgba(200,136,10,.45); outline-offset: -2px; }
         @keyframes spin { to { transform: rotate(360deg); } }
         .spin { animation: spin .9s linear infinite; }
       `}</style>
@@ -228,7 +231,8 @@ export default function GrammarView({ onBack, onExit }) {
               background:"#fff", border:"1px solid rgba(180,130,40,.2)",
               borderRadius:11, padding:".55rem .9rem", marginBottom:"1.5rem",
               boxShadow:"0 1px 5px rgba(120,80,20,.06)",
-            }}>
+              transition:"border-color .2s, box-shadow .2s",
+            }} className="g-search-wrap">
               <Search size={15} style={{ color:"#b09070", flexShrink:0 }} />
               <input
                 className="g-search-input"
@@ -241,7 +245,7 @@ export default function GrammarView({ onBack, onExit }) {
                 }}
               />
               {query && (
-                <button onClick={() => setQuery("")} style={{ background:"none", border:"none", cursor:"pointer", color:"#b09070", display:"flex" }}>
+                <button onClick={() => setQuery("")} className="g-clear-btn" style={{ background:"none", border:"none", cursor:"pointer", color:"#b09070", display:"flex" }}>
                   <X size={14} />
                 </button>
               )}

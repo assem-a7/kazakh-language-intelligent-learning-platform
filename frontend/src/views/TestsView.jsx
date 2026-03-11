@@ -66,6 +66,7 @@ function TypeSelector({ onSelect }) {
         const rgb = hexRgb(accent);
         return (
           <button key={id}
+            className="ts-type-btn"
             onClick={() => onSelect(id)}
             style={{
               cursor:"pointer", borderRadius:13, padding:"1.1rem 1.2rem",
@@ -184,6 +185,7 @@ function TranslateCheckQ({ sentence, onAnswer }) {
       </div>
 
       <textarea
+        className="ts-textarea"
         value={value}
         onChange={e => setValue(e.target.value)}
         disabled={!!result}
@@ -195,7 +197,7 @@ function TranslateCheckQ({ sentence, onAnswer }) {
           border:`1px solid ${result ? (result.correct ? "rgba(31,168,154,.35)" : "rgba(184,64,32,.3)") : "rgba(180,130,40,.22)"}`,
           borderRadius:11, padding:".7rem .95rem", fontSize:".9rem",
           color:"#2c2010", resize:"vertical", outline:"none", fontFamily:"inherit",
-          transition:"border-color .2s",
+          transition:"border-color .2s, box-shadow .2s",
         }}
         onKeyDown={e => { if (e.key==="Enter" && !e.shiftKey && !result) { e.preventDefault(); handle(); } }}
       />
@@ -380,7 +382,11 @@ export default function TestsView({ onBack, onExit, onProgress }) {
 
   return (
     <div style={{ minHeight:"100dvh", background:"#faf7f2", display:"flex", flexDirection:"column" }}>
-      <style>{`@keyframes spin{to{transform:rotate(360deg)}}.spin{animation:spin .9s linear infinite}`}</style>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}.spin{animation:spin .9s linear infinite}
+        .ts-textarea::placeholder { color: #b09070; }
+        .ts-textarea { font-family: inherit; }
+        .ts-textarea:focus { border-color: rgba(200,136,10,.42) !important; box-shadow: 0 0 0 3px rgba(200,136,10,.1) !important; outline: none; }
+        .ts-btn-primary:focus-visible, .ts-btn-secondary:focus-visible, .ts-type-btn:focus-visible { outline: 2px solid rgba(200,136,10,.5); outline-offset: 2px; }`}</style>
 
       <AppHeader
         title={testType ? (testType === "multichoice" ? "Тест: Выбери перевод" : "Тест: Введи перевод") : "Тесты"}

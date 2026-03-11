@@ -48,6 +48,7 @@ function TabBar({ active, onChange }) {
       {tabs.map(t => (
         <button
           key={t.id}
+          className="dict-tab-btn"
           onClick={() => onChange(t.id)}
           style={{
             flex: 1, padding: ".48rem .75rem",
@@ -454,7 +455,11 @@ export default function DictionaryView({ onBack, onExit }) {
           border-color: rgba(200,136,10,.45); color: #4a2e08;
           box-shadow: 0 4px 14px rgba(120,80,20,.12); transform: translateY(-1px);
         }
+        .show-more-btn:focus-visible {
+          outline: 2px solid rgba(200,136,10,.5); outline-offset: 2px;
+        }
         .show-more-btn:disabled { opacity: .4; cursor: not-allowed; }
+        .dict-tab-btn:focus-visible { outline: 2px solid rgba(200,136,10,.5); outline-offset: 2px; }
         @keyframes spin { to { transform: rotate(360deg); } }
         .spin { animation: spin .9s linear infinite; }
         @keyframes cardFadeIn { from{opacity:0;transform:translateY(12px)} to{opacity:1;transform:translateY(0)} }

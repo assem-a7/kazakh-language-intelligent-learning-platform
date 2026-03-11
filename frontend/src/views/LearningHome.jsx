@@ -1,6 +1,6 @@
 // UI-only changes; logic unchanged
 import { useState, useEffect } from "react";
-import { Image, BookOpen, PenLine, ClipboardCheck, TrendingUp, ChevronRight, Settings, Loader2 } from "lucide-react";
+import { Image, BookOpen, PenLine, ClipboardCheck, TrendingUp, ChevronRight, Settings, Loader2, MessageCircle } from "lucide-react";
 import AppHeader from "../components/AppHeader";
 import { loadCsv } from "../utils/csvLoader";
 
@@ -10,6 +10,7 @@ const MODULES = [
   { id: "exercises",  icon: PenLine,         accent: "#1fa89a", title: "Упражнения", desc: "Практика: перевод, пропуски, выбор",    badge: null },
   { id: "tests",      icon: ClipboardCheck,  accent: "#b84020", title: "Тесты",      desc: "Контрольные срезы по материалу",        badge: null },
   { id: "progress",   icon: TrendingUp,      accent: "#a84020", title: "Прогресс",   desc: "Статистика: точность, серия, динамика", badge: null },
+  { id: "ai_tutor",   icon: MessageCircle,   accent: "#1fa89a", title: "AI Тьютор",  desc: "Грамматика бойынша сұрақ қой — AI жауап береді", badge: "Жаңа" },
 ];
 
 function hexRgb(hex) {

@@ -1,5 +1,5 @@
 // UI-only changes; logic unchanged. New logic added in ProgressView only: participant ID, reset, topic table, export.
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { BarChart2, Zap, Clock, Target, TrendingUp, AlertTriangle, CheckCircle, RefreshCw, Copy, Download, Trash2, UserX, User } from "lucide-react";
 import AppHeader from "../components/AppHeader";
 import { loadCsv } from "../utils/csvLoader";
@@ -71,6 +71,192 @@ const WARM  = "#c8880a";
 const TERRA = "#b06820";
 const COOL  = "#1fa89a";
 const DIM   = "#b84020";
+
+const TOPIC_ACCENTS = [WARM, TERRA, COOL, DIM, "#b06820", "#c8880a", "#1fa89a", "#a84020", "#b84020"];
+
+// ── Shared topic-stats hook ───────────────────────────────────────────────────
+// Computes per-category tallies from attempts + sentences.csv + categories.csv.
+// Attempts without sentence_id are skipped.
+// Attempts with a sentence_id that has no category_id are grouped as "Без темы".
+// RULE: attempts format is never modified here.
+function useTopicStats(attempts, sentences, categories) {
+  return useMemo(() => {
+    if (!categories.length && !sentences.length) return [];
+
+    // sentence_id → category_id  (empty category_id → undefined → "no_topic" bucket)
+    const sentCatMap = {};
+    sentences.forEach(s => {
+      if (s.id == null || s.id === "") return;
+      const catId = (s.category_id != null && s.category_id !== "")
+        ? String(s.category_id)
+        : null;              // null means sentence exists but no category assigned
+      sentCatMap[String(s.id)] = catId;
+    });
+
+    // category_id → display name
+    const catNameMap = {};
+    categories.forEach(c => {
+      const key = String(c.id ?? "");
+      if (key) catNameMap[key] = c.name_ru || c.slug || key;
+      if (c.slug) catNameMap[String(c.slug)] = c.name_ru || c.slug;
+    });
+
+    const allCatIds = categories.map(c => String(c.id ?? "")).filter(Boolean);
+
+    // seed known categories
+    const tally = {};
+    allCatIds.forEach(id => {
+      tally[id] = { correct:0, total:0, timeSum:0, timeCount:0 };
+    });
+    // bucket for sentences that exist but have no category
+    const NO_TOPIC_KEY = "__no_topic__";
+    tally[NO_TOPIC_KEY] = { correct:0, total:0, timeSum:0, timeCount:0 };
+
+    attempts.forEach(a => {
+      // skip if no sentence reference at all
+      if (a.sentence_id == null || a.sentence_id === "") return;
+
+      const sid = String(a.sentence_id);
+
+      // sentence not in CSV → skip entirely (we cannot map it)
+      if (!(sid in sentCatMap)) return;
+
+      const catId = sentCatMap[sid] ?? NO_TOPIC_KEY;
+      if (!tally[catId]) tally[catId] = { correct:0, total:0, timeSum:0, timeCount:0 };
+
+      tally[catId].total += 1;
+      if (a.correct === true || a.correct === "true") tally[catId].correct += 1;
+      if (a.time_ms && Number(a.time_ms) > 0) {
+        tally[catId].timeSum   += Number(a.time_ms);
+        tally[catId].timeCount += 1;
+      }
+    });
+
+    const rows = allCatIds.map((catId, i) => ({
+      catId,
+      name:    catNameMap[catId] || catId,
+      correct: tally[catId].correct,
+      total:   tally[catId].total,
+      avgSec:  tally[catId].timeCount > 0 ? tally[catId].timeSum / tally[catId].timeCount / 1000 : null,
+      accent:  TOPIC_ACCENTS[i % TOPIC_ACCENTS.length],
+      isNoTopic: false,
+    }));
+
+    // only append "Без темы" row if there are actual orphan attempts
+    const noTopicTally = tally[NO_TOPIC_KEY];
+    if (noTopicTally.total > 0) {
+      rows.push({
+        catId:   NO_TOPIC_KEY,
+        name:    "Без темы",
+        correct: noTopicTally.correct,
+        total:   noTopicTally.total,
+        avgSec:  noTopicTally.timeCount > 0 ? noTopicTally.timeSum / noTopicTally.timeCount / 1000 : null,
+        accent:  "#a08060",
+        isNoTopic: true,
+      });
+    }
+
+    return rows.sort((a, b) => b.total - a.total);
+  }, [attempts, sentences, categories]);
+}
+
+// ── ConfirmModal ──────────────────────────────────────────────────────────────
+// Replaces window.confirm for a safer, styled in-page modal.
+function ConfirmModal({ title, message, confirmLabel, confirmColor, onConfirm, onCancel }) {
+  const overlayRef = useRef(null);
+
+  // close on overlay click
+  const handleOverlay = (e) => {
+    if (e.target === overlayRef.current) onCancel();
+  };
+
+  // close on Escape
+  useEffect(() => {
+    const handler = (e) => { if (e.key === "Escape") onCancel(); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onCancel]);
+
+  const cc = confirmColor || DIM;
+  const ccRgb = hexRgb(cc);
+
+  return (
+    <div
+      ref={overlayRef}
+      onClick={handleOverlay}
+      style={{
+        position:"fixed", inset:0, zIndex:200,
+        background:"rgba(20,12,4,.45)",
+        backdropFilter:"blur(4px)",
+        display:"flex", alignItems:"center", justifyContent:"center",
+        padding:"1.5rem",
+      }}
+    >
+      <div style={{
+        background:"#fff", borderRadius:16,
+        border:"1px solid rgba(180,130,40,.22)",
+        boxShadow:"0 16px 60px rgba(40,20,4,.18)",
+        padding:"1.6rem 1.75rem 1.4rem",
+        maxWidth:380, width:"100%",
+        display:"flex", flexDirection:"column", gap:"1rem",
+        animation:"pv-pop .18s cubic-bezier(0.16,1,0.3,1)",
+      }}>
+        {/* title */}
+        <div style={{ display:"flex", alignItems:"center", gap:".65rem" }}>
+          <div style={{
+            width:34, height:34, borderRadius:9,
+            background:`rgba(${ccRgb},.1)`,
+            border:`1px solid rgba(${ccRgb},.2)`,
+            display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0,
+          }}>
+            <AlertTriangle size={16} style={{ color:cc }} />
+          </div>
+          <h3 style={{ fontSize:".95rem", fontWeight:800, color:"#2c2010", margin:0, lineHeight:1.25 }}>
+            {title}
+          </h3>
+        </div>
+
+        {/* message */}
+        <p style={{ fontSize:".83rem", color:"#7a5a30", lineHeight:1.65, margin:0 }}>
+          {message}
+        </p>
+
+        {/* divider */}
+        <div style={{ height:1, background:"rgba(180,130,40,.14)" }} />
+
+        {/* buttons */}
+        <div style={{ display:"flex", gap:".55rem", justifyContent:"flex-end" }}>
+          <button
+            onClick={onCancel}
+            style={{
+              padding:".55rem 1.1rem", minHeight:40, borderRadius:99,
+              background:"rgba(180,130,40,.07)", border:"1px solid rgba(180,130,40,.24)",
+              color:"#7a5a30", fontSize:".82rem", fontWeight:600, cursor:"pointer",
+              transition:"background .18s, border-color .18s",
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background="rgba(180,130,40,.13)"; }}
+            onMouseLeave={e => { e.currentTarget.style.background="rgba(180,130,40,.07)"; }}
+          >
+            Отмена
+          </button>
+          <button
+            onClick={onConfirm}
+            style={{
+              padding:".55rem 1.2rem", minHeight:40, borderRadius:99,
+              background:`rgba(${ccRgb},.1)`, border:`1px solid rgba(${ccRgb},.32)`,
+              color:cc, fontSize:".82rem", fontWeight:700, cursor:"pointer",
+              transition:"background .18s, border-color .18s, box-shadow .18s",
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background=`rgba(${ccRgb},.18)`; e.currentTarget.style.boxShadow=`0 4px 16px rgba(${ccRgb},.18)`; }}
+            onMouseLeave={e => { e.currentTarget.style.background=`rgba(${ccRgb},.1)`;  e.currentTarget.style.boxShadow="none"; }}
+          >
+            {confirmLabel || "Подтвердить"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // ── SectionHead ───────────────────────────────────────────────────────────────
 function SectionHead({ children }) {
@@ -271,50 +457,8 @@ function RecentAttempts({ attempts }) {
   );
 }
 
-// ── TopicAccuracyBlock (bars) ─────────────────────────────────────────────────
-const TOPIC_ACCENTS = [WARM, TERRA, COOL, DIM, "#b06820", "#c8880a", "#1fa89a", "#a84020", "#b84020"];
-
-function TopicAccuracyBlock({ attempts, sentences, categories }) {
-  const topicStats = useMemo(() => {
-    if (!categories.length) return [];
-
-    const sentCatMap = {};
-    sentences.forEach(s => {
-      if (s.id != null && s.id !== "" && s.category_id != null && s.category_id !== "") {
-        sentCatMap[String(s.id)] = String(s.category_id);
-      }
-    });
-
-    const catNameMap = {};
-    categories.forEach(c => {
-      const key = String(c.id ?? "");
-      if (key) catNameMap[key] = c.name_ru || c.slug || key;
-      if (c.slug) catNameMap[String(c.slug)] = c.name_ru || c.slug;
-    });
-
-    const allCatIds = categories.map(c => String(c.id ?? "")).filter(Boolean);
-
-    const tally = {};
-    allCatIds.forEach(id => { tally[id] = { correct: 0, total: 0 }; });
-
-    attempts.forEach(a => {
-      if (a.sentence_id == null || a.sentence_id === "") return;
-      const catId = sentCatMap[String(a.sentence_id)];
-      if (!catId) return;
-      if (!tally[catId]) tally[catId] = { correct: 0, total: 0 };
-      tally[catId].total += 1;
-      if (a.correct === true || a.correct === "true") tally[catId].correct += 1;
-    });
-
-    return allCatIds.map((catId, i) => ({
-      catId,
-      name:    catNameMap[catId] || catId,
-      correct: tally[catId].correct,
-      total:   tally[catId].total,
-      accent:  TOPIC_ACCENTS[i % TOPIC_ACCENTS.length],
-    })).sort((a, b) => b.total - a.total);
-  }, [attempts, sentences, categories]);
-
+// ── TopicAccuracyBlock (bar rows) ─────────────────────────────────────────────
+function TopicAccuracyBlock({ topicStats }) {
   if (!topicStats.length) return null;
 
   return (
@@ -326,13 +470,18 @@ function TopicAccuracyBlock({ attempts, sentences, categories }) {
         display:"flex", flexDirection:"column", gap:".9rem",
         boxShadow:"0 1px 6px rgba(120,80,20,.07)",
       }}>
-        {topicStats.map(({ catId, name, correct, total, accent }) => {
+        {topicStats.map(({ catId, name, correct, total, accent, isNoTopic }) => {
           const p     = total > 0 ? Math.round((correct / total) * 100) : null;
           const muted = total === 0;
           const rgb   = hexRgb(accent);
           return (
             <div key={catId} style={{ display:"grid", gridTemplateColumns:"1fr 3fr 3.5rem", alignItems:"center", gap:".85rem" }}>
-              <span style={{ fontSize:".78rem", fontWeight:500, color: muted ? "rgba(180,130,40,.3)" : "#6b5030", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
+              <span style={{
+                fontSize:".78rem", fontWeight: isNoTopic ? 400 : 500,
+                color: muted ? "rgba(180,130,40,.3)" : isNoTopic ? "#a08060" : "#6b5030",
+                whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis",
+                fontStyle: isNoTopic ? "italic" : "normal",
+              }}>
                 {name}
               </span>
               <div style={{ height:3, background:"rgba(180,130,40,.1)", borderRadius:99, overflow:"hidden" }}>
@@ -360,69 +509,52 @@ function TopicAccuracyBlock({ attempts, sentences, categories }) {
   );
 }
 
-// ── NEW: TopicTable (research data) ──────────────────────────────────────────
-function TopicTable({ attempts, sentences, categories }) {
-  const rows = useMemo(() => {
-    if (!categories.length) return [];
+// ── TopicTable ────────────────────────────────────────────────────────────────
+// Shows: Topic | mini-bar | Attempts | Correct | Accuracy% | Avg time(s)
+function TopicTable({ topicStats }) {
+  if (!topicStats.length) return null;
 
-    const sentCatMap = {};
-    sentences.forEach(s => {
-      if (s.id != null && s.id !== "" && s.category_id != null && s.category_id !== "") {
-        sentCatMap[String(s.id)] = String(s.category_id);
-      }
-    });
-
-    const catNameMap = {};
-    categories.forEach(c => {
-      const key = String(c.id ?? "");
-      if (key) catNameMap[key] = c.name_ru || c.slug || key;
-      if (c.slug) catNameMap[String(c.slug)] = c.name_ru || c.slug;
-    });
-
-    const allCatIds = categories.map(c => String(c.id ?? "")).filter(Boolean);
-
-    const tally = {};
-    allCatIds.forEach(id => { tally[id] = { correct: 0, total: 0, timeSum: 0, timeCount: 0 }; });
-
-    attempts.forEach(a => {
-      if (a.sentence_id == null || a.sentence_id === "") return;
-      const catId = sentCatMap[String(a.sentence_id)];
-      if (!catId) return;
-      if (!tally[catId]) tally[catId] = { correct: 0, total: 0, timeSum: 0, timeCount: 0 };
-      tally[catId].total += 1;
-      if (a.correct === true || a.correct === "true") tally[catId].correct += 1;
-      if (a.time_ms && Number(a.time_ms) > 0) {
-        tally[catId].timeSum   += Number(a.time_ms);
-        tally[catId].timeCount += 1;
-      }
-    });
-
-    return allCatIds.map(catId => ({
-      catId,
-      name:    catNameMap[catId] || catId,
-      correct: tally[catId].correct,
-      total:   tally[catId].total,
-      avgSec:  tally[catId].timeCount > 0 ? (tally[catId].timeSum / tally[catId].timeCount / 1000) : null,
-    })).sort((a, b) => b.total - a.total);
-  }, [attempts, sentences, categories]);
-
-  if (!rows.length) return null;
+  // find max total for proportional mini-bar width
+  const maxTotal = Math.max(...topicStats.map(r => r.total), 1);
 
   const COL = {
-    head: { fontSize:".65rem", fontWeight:700, color:"#a08060", letterSpacing:".09em", textTransform:"uppercase", padding:".45rem .6rem", textAlign:"left", borderBottom:"2px solid rgba(180,130,40,.18)", background:"rgba(200,136,10,.04)" },
-    cell: { fontSize:".78rem", color:"#6b5030", padding:".55rem .6rem", borderBottom:"1px solid rgba(180,130,40,.09)", verticalAlign:"middle" },
-    mono: { fontSize:".78rem", fontFamily:"'JetBrains Mono',monospace", fontWeight:700, padding:".55rem .6rem", borderBottom:"1px solid rgba(180,130,40,.09)", textAlign:"right", verticalAlign:"middle" },
+    head: {
+      fontSize:".63rem", fontWeight:700, color:"#a08060",
+      letterSpacing:".09em", textTransform:"uppercase",
+      padding:".5rem .65rem", textAlign:"left",
+      borderBottom:"2px solid rgba(180,130,40,.18)",
+      background:"rgba(200,136,10,.035)",
+      whiteSpace:"nowrap",
+    },
+    cell: {
+      fontSize:".78rem", color:"#6b5030",
+      padding:".55rem .65rem",
+      borderBottom:"1px solid rgba(180,130,40,.08)",
+      verticalAlign:"middle",
+    },
+    mono: {
+      fontSize:".78rem", fontFamily:"'JetBrains Mono',monospace", fontWeight:700,
+      padding:".55rem .65rem",
+      borderBottom:"1px solid rgba(180,130,40,.08)",
+      textAlign:"right", verticalAlign:"middle",
+    },
   };
 
   return (
     <div>
       <SectionHead>Детальная таблица по темам</SectionHead>
-      <div style={{ background:"#fff", border:"1px solid rgba(180,130,40,.18)", borderRadius:12, overflow:"hidden", boxShadow:"0 1px 6px rgba(120,80,20,.07)" }}>
+      <div style={{
+        background:"#fff", border:"1px solid rgba(180,130,40,.18)",
+        borderRadius:12, overflow:"hidden",
+        boxShadow:"0 1px 6px rgba(120,80,20,.07)",
+      }}>
         <div style={{ overflowX:"auto" }}>
-          <table style={{ width:"100%", borderCollapse:"collapse", minWidth:420 }}>
+          <table style={{ width:"100%", borderCollapse:"collapse", minWidth:480 }}>
             <thead>
               <tr>
-                <th style={{ ...COL.head, width:"30%" }}>Тема</th>
+                <th style={{ ...COL.head, width:"28%" }}>Тема</th>
+                {/* mini bar column — visual only */}
+                <th style={{ ...COL.head, width:"18%", textAlign:"center" }}>График</th>
                 <th style={{ ...COL.head, textAlign:"right" }}>Попытки</th>
                 <th style={{ ...COL.head, textAlign:"right" }}>Верно</th>
                 <th style={{ ...COL.head, textAlign:"right" }}>Точность</th>
@@ -430,24 +562,62 @@ function TopicTable({ attempts, sentences, categories }) {
               </tr>
             </thead>
             <tbody>
-              {rows.map((r, i) => {
-                const p       = pct(r.correct, r.total);
-                const noData  = r.total === 0;
-                const pColor  = p === null ? "#b09070" : p >= 70 ? COOL : p >= 50 ? WARM : DIM;
+              {topicStats.map((r, i) => {
+                const p        = pct(r.correct, r.total);
+                const noData   = r.total === 0;
+                const pColor   = p === null ? "#b09070" : p >= 70 ? COOL : p >= 50 ? WARM : DIM;
+                const barW     = noData ? 0 : Math.round((r.total / maxTotal) * 100);
+                const rgb      = hexRgb(r.accent);
+                const rowBg    = i % 2 === 0 ? "transparent" : "rgba(180,130,40,.02)";
+
                 return (
-                  <tr key={r.catId} style={{ background: i % 2 === 0 ? "transparent" : "rgba(180,130,40,.025)" }}>
-                    <td style={{ ...COL.cell, fontWeight:500, color: noData ? "#b09070" : "#2c2010" }}>
+                  <tr key={r.catId} style={{ background: rowBg }}>
+                    {/* name */}
+                    <td style={{
+                      ...COL.cell, fontWeight: r.isNoTopic ? 400 : 600,
+                      color: noData ? "#b09070" : r.isNoTopic ? "#a08060" : "#2c2010",
+                      fontStyle: r.isNoTopic ? "italic" : "normal",
+                    }}>
                       {r.name}
                     </td>
+
+                    {/* mini bar — attempts volume (UI-only visualization) */}
+                    <td style={{ ...COL.cell, padding:".55rem .65rem" }}>
+                      <div style={{
+                        height:6, borderRadius:99,
+                        background:"rgba(180,130,40,.1)",
+                        overflow:"hidden",
+                        minWidth:40,
+                      }}>
+                        <div style={{
+                          height:"100%", borderRadius:99,
+                          background: noData
+                            ? "transparent"
+                            : `linear-gradient(90deg,${r.accent},rgba(${rgb},.35))`,
+                          width:`${barW}%`,
+                          transition:"width .55s cubic-bezier(0.16,1,0.3,1)",
+                        }} />
+                      </div>
+                    </td>
+
+                    {/* attempts */}
                     <td style={{ ...COL.mono, color: noData ? "#b09070" : "#6b5030" }}>
                       {r.total || "—"}
                     </td>
+
+                    {/* correct */}
                     <td style={{ ...COL.mono, color: noData ? "#b09070" : "#6b5030" }}>
                       {noData ? "—" : r.correct}
                     </td>
+
+                    {/* accuracy */}
                     <td style={{ ...COL.mono, color: pColor, fontWeight:700 }}>
-                      {noData ? "нет попыток" : `${p}%`}
+                      {noData ? (
+                        <span style={{ fontSize:".68rem", fontWeight:400, color:"#c0a080" }}>нет данных</span>
+                      ) : `${p}%`}
                     </td>
+
+                    {/* avg time */}
                     <td style={{ ...COL.mono, color:"#8a6030" }}>
                       {r.avgSec !== null ? `${r.avgSec.toFixed(1)}с` : "—"}
                     </td>
@@ -462,7 +632,7 @@ function TopicTable({ attempts, sentences, categories }) {
   );
 }
 
-// ── NEW: ParticipantBlock ─────────────────────────────────────────────────────
+// ── ParticipantBlock ──────────────────────────────────────────────────────────
 function ParticipantBlock({ participantId, onResetProgress, onNewParticipant }) {
   const [copied, setCopied] = useState(false);
 
@@ -506,6 +676,7 @@ function ParticipantBlock({ participantId, onResetProgress, onNewParticipant }) 
             </div>
           </div>
           <button
+            className="pv-btn"
             onClick={handleCopy}
             style={{
               ...BTN_BASE,
@@ -526,6 +697,7 @@ function ParticipantBlock({ participantId, onResetProgress, onNewParticipant }) 
         {/* Reset buttons */}
         <div style={{ display:"flex", gap:".6rem", flexWrap:"wrap" }}>
           <button
+            className="pv-btn-danger"
             onClick={onResetProgress}
             style={{
               ...BTN_BASE,
@@ -538,6 +710,7 @@ function ParticipantBlock({ participantId, onResetProgress, onNewParticipant }) 
             <Trash2 size={14} /> Сбросить прогресс
           </button>
           <button
+            className="pv-btn"
             onClick={onNewParticipant}
             style={{
               ...BTN_BASE,
@@ -560,7 +733,7 @@ function ParticipantBlock({ participantId, onResetProgress, onNewParticipant }) 
   );
 }
 
-// ── NEW: ExportBlock ──────────────────────────────────────────────────────────
+// ── ExportBlock ───────────────────────────────────────────────────────────────
 function ExportBlock({ attempts, participantId }) {
   const [copied, setCopied] = useState(false);
 
@@ -616,6 +789,7 @@ function ExportBlock({ attempts, participantId }) {
         </p>
         <div style={{ display:"flex", gap:".6rem", flexWrap:"wrap" }}>
           <button
+            className="pv-btn"
             onClick={handleCopyJson}
             style={{
               ...BTN_BASE,
@@ -630,6 +804,7 @@ function ExportBlock({ attempts, participantId }) {
             {copied ? "Скопировано!" : "Скопировать JSON"}
           </button>
           <button
+            className="pv-btn-cool"
             onClick={handleDownload}
             style={{
               ...BTN_BASE,
@@ -651,17 +826,24 @@ function ExportBlock({ attempts, participantId }) {
 
 // ── MAIN VIEW ─────────────────────────────────────────────────────────────────
 export default function ProgressView({ onBack, onExit }) {
-  const [refreshKey, setRefreshKey]   = useState(0);
-  const [sentences, setSentences]     = useState([]);
-  const [categories, setCategories]   = useState([]);
+  const [refreshKey, setRefreshKey]       = useState(0);
+  const [sentences, setSentences]         = useState([]);
+  const [categories, setCategories]       = useState([]);
   const [participantId, setParticipantId] = useState(() => getOrCreateParticipantId());
+
+  // modal state: null | "reset_progress" | "new_participant"
+  const [modal, setModal] = useState(null);
 
   useEffect(() => {
     loadCsv("/data/sentences.csv").then(setSentences).catch(() => {});
     loadCsv("/data/categories.csv").then(setCategories).catch(() => {});
   }, []);
 
-  const attempts    = useMemo(() => loadAttempts(), [refreshKey]);
+  // attempts format is never modified — loaded as-is
+  const attempts = useMemo(() => loadAttempts(), [refreshKey]);
+
+  // single shared topic stats computation — used by both bar block and table
+  const topicStats = useTopicStats(attempts, sentences, categories);
 
   const stats = useMemo(() => {
     const all   = attempts;
@@ -686,31 +868,68 @@ export default function ProgressView({ onBack, onExit }) {
 
   const overallPct = pct(stats.allCorrect, stats.allTotal);
 
-  // ── reset handlers ──────────────────────────────────────────────────────────
-  const handleResetProgress = useCallback(() => {
-    if (!window.confirm("Удалить все данные о попытках? ID участника сохранится.")) return;
-    try { localStorage.removeItem(LS_KEY); } catch {}
-    setRefreshKey(k => k + 1);
-  }, []);
+  // ── reset handlers (open modal instead of window.confirm) ───────────────────
+  const handleResetProgress   = useCallback(() => setModal("reset_progress"),   []);
+  const handleNewParticipant  = useCallback(() => setModal("new_participant"),   []);
 
-  const handleNewParticipant = useCallback(() => {
-    if (!window.confirm("Сбросить всё и начать как новый участник? Попытки и выбор тем будут удалены.")) return;
-    try {
-      localStorage.removeItem(LS_KEY);
-      // remove topic selection keys (best-effort, no crash if absent)
-      ["qazaqai_active_category", "qazaqai_active_topics", "qazaqai_selected_topics"].forEach(k => {
-        try { localStorage.removeItem(k); } catch {}
-      });
-      const newId = genParticipantId();
-      localStorage.setItem(LS_PARTICIPANT_ID, newId);
-      setParticipantId(newId);
-    } catch {}
-    setRefreshKey(k => k + 1);
-  }, []);
+  const handleConfirmModal = useCallback(() => {
+    if (modal === "reset_progress") {
+      try { localStorage.removeItem(LS_KEY); } catch {}
+      setRefreshKey(k => k + 1);
+    } else if (modal === "new_participant") {
+      try {
+        localStorage.removeItem(LS_KEY);
+        ["qazaqai_active_category", "qazaqai_active_topics", "qazaqai_selected_topics",
+         "qazaqai_categories" /* onboarding selection */].forEach(k => {
+          try { localStorage.removeItem(k); } catch {}
+        });
+        const newId = genParticipantId();
+        localStorage.setItem(LS_PARTICIPANT_ID, newId);
+        setParticipantId(newId);
+      } catch {}
+      setRefreshKey(k => k + 1);
+    }
+    setModal(null);
+  }, [modal]);
+
+  const MODAL_CONFIGS = {
+    reset_progress: {
+      title:        "Сбросить прогресс?",
+      message:      "Все данные о попытках будут удалены. ID участника сохранится — это действие нельзя отменить.",
+      confirmLabel: "Да, удалить попытки",
+      confirmColor: DIM,
+    },
+    new_participant: {
+      title:        "Начать заново?",
+      message:      "Попытки, выбор тем и настройки будут удалены. Будет сгенерирован новый ID участника. Это действие нельзя отменить.",
+      confirmLabel: "Да, новый участник",
+      confirmColor: TERRA,
+    },
+  };
 
   return (
     <div style={{ minHeight:"100dvh", background:"#faf7f2", display:"flex", flexDirection:"column" }}>
-      <style>{`@keyframes spin{to{transform:rotate(360deg)}}.spin{animation:spin .85s linear infinite}`}</style>
+      <style>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes pv-pop {
+          from { opacity:0; transform: scale(.94) translateY(6px); }
+          to   { opacity:1; transform: scale(1)   translateY(0);   }
+        }
+        .spin { animation: spin .85s linear infinite; }
+        .pv-btn:focus-visible        { outline: 2px solid rgba(200,136,10,.5);   outline-offset: 2px; }
+        .pv-btn-danger:focus-visible { outline: 2px solid rgba(184,64,32,.45);   outline-offset: 2px; }
+        .pv-btn-cool:focus-visible   { outline: 2px solid rgba(31,168,154,.45);  outline-offset: 2px; }
+      `}</style>
+
+      {/* ── Confirm modal (portal-free, rendered above everything) ─────────── */}
+      {modal && (
+        <ConfirmModal
+          {...MODAL_CONFIGS[modal]}
+          onConfirm={handleConfirmModal}
+          onCancel={() => setModal(null)}
+        />
+      )}
+
       <AppHeader title="Прогресс" onBack={onBack} onExit={onExit} />
 
       <div style={{ flex:1, overflowY:"auto", padding:PAGE_PAD }}>
@@ -729,6 +948,7 @@ export default function ProgressView({ onBack, onExit }) {
               </p>
             </div>
             <button
+              className="pv-btn"
               onClick={() => setRefreshKey(k => k + 1)}
               style={{
                 display:"flex", alignItems:"center", gap:".35rem",
@@ -770,11 +990,11 @@ export default function ProgressView({ onBack, onExit }) {
             </div>
           </div>
 
-          {/* Topic bars */}
-          <TopicAccuracyBlock attempts={attempts} sentences={sentences} categories={categories} />
+          {/* Topic bars — uses shared topicStats */}
+          <TopicAccuracyBlock topicStats={topicStats} />
 
-          {/* Topic table */}
-          <TopicTable attempts={attempts} sentences={sentences} categories={categories} />
+          {/* Topic table — uses shared topicStats */}
+          <TopicTable topicStats={topicStats} />
 
           {/* Recommendations */}
           <Recommendations attempts={attempts} />

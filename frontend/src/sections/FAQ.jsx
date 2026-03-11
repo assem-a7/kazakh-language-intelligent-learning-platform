@@ -44,7 +44,6 @@ function FAQItem({ item, index, isInView }) {
         borderRadius: 12,
         boxShadow: open ? "0 4px 18px rgba(120,80,20,.10)" : "0 1px 6px rgba(120,80,20,.06)",
         overflow: "hidden",
-        transition2: "border-color .25s, box-shadow .25s",
       }}
     >
       <button

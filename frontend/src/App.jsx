@@ -19,6 +19,7 @@ import GrammarView    from "./views/GrammarView";
 import ExercisesView  from "./views/ExercisesView";
 import TestsView      from "./views/TestsView";
 import ProgressView   from "./views/ProgressView";
+import AITutorView    from "./views/AITutorView";
 
 const LS_KEY = "qazaqai_categories";
 
@@ -77,6 +78,7 @@ export default function App() {
     else if (activeView === "exercises")   screen = <ExercisesView  onBack={goHome} onExit={handleExit} />;
     else if (activeView === "tests")       screen = <TestsView      onBack={goHome} onExit={handleExit} onProgress={goProgress} />;
     else if (activeView === "progress")    screen = <ProgressView   onBack={goHome} onExit={handleExit} />;
+    else if (activeView === "ai_tutor")    screen = <AITutorView    onBack={goHome} onExit={handleExit} />;
 
     return <ScreenTransition viewKey={activeView}>{screen}</ScreenTransition>;
   }
