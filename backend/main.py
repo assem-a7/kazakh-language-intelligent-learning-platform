@@ -15,7 +15,7 @@ from model import KazakhAnswerModel
 from groq import Groq
 
 # ─── ОСЫ ЖЕРГЕ ӨЗ KEY-ІҢДІ ЖАЗ ──────────────────────────────────────────────
-GROQ_API_KEY = "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"   # <-- мұнда өз gsk_... key-іңді қой
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")   # <-- мұнда өз gsk_... key-іңді қой
 # ─────────────────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """Сен QazaqAI платформасының AI тьюторысың.
