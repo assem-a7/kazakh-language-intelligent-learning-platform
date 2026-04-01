@@ -1,0 +1,107 @@
+{
+  "locative": {
+    "accuracy": 0.975,
+    "correct": 39,
+    "total": 40
+  },
+  "accusative": {
+    "accuracy": 0.9714,
+    "correct": 34,
+    "total": 35
+  },
+  "future_tense": {
+    "accuracy": 0.9667,
+    "correct": 58,
+    "total": 60
+  },
+  "dative": {
+    "accuracy": 0.95,
+    "correct": 38,
+    "total": 40
+  },
+  "ablative": {
+    "accuracy": 0.9,
+    "correct": 36,
+    "total": 40
+  },
+  "present_first_person": {
+    "accuracy": 0.8857,
+    "correct": 31,
+    "total": 35
+  },
+  "present_tense": {
+    "accuracy": 0.8704,
+    "correct": 47,
+    "total": 54
+  },
+  "past_tense": {
+    "accuracy": 0.8375,
+    "correct": 67,
+    "total": 80
+  },
+  "present_second_person": {
+    "accuracy": 0.8333,
+    "correct": 25,
+    "total": 30
+  },
+  "plural": {
+    "accuracy": 0.8286,
+    "correct": 29,
+    "total": 35
+  },
+  "instrumental": {
+    "accuracy": 0.8,
+    "correct": 20,
+    "total": 25
+  },
+  "vowel_harmony": {
+    "accuracy": 0.8,
+    "correct": 16,
+    "total": 20
+  },
+  "genitive": {
+    "accuracy": 0.76,
+    "correct": 19,
+    "total": 25
+  },
+  "possessive": {
+    "accuracy": 0.7,
+    "correct": 21,
+    "total": 30
+  },
+  "negation": {
+    "accuracy": 0.6222,
+    "correct": 28,
+    "total": 45
+  },
+  "possessive_short": {
+    "accuracy": 0.6,
+    "correct": 18,
+    "total": 30
+  },
+  "adjective": {
+    "accuracy": 0.55,
+    "correct": 11,
+    "total": 20
+  },
+  "numerals": {
+    "accuracy": 0.5,
+    "correct": 10,
+    "total": 20
+  },
+  "sentence": {
+    "accuracy": 0.4545,
+    "correct": 25,
+    "total": 55
+  },
+  "word_order": {
+    "accuracy": 0.45,
+    "correct": 9,
+    "total": 20
+  },
+  "question": {
+    "accuracy": 0.4,
+    "correct": 6,
+    "total": 15
+  }
+}

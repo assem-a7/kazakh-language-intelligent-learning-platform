@@ -346,6 +346,9 @@ function Recommendations({ attempts }) {
     if (testAttempts.length > 0 && testPct !== null && testPct < 50) {
       list.push({ icon: AlertTriangle, accent: DIM, text: "Точность по тестам ниже 50%. Рекомендуем пройти «Упражнения → Выбери правильный перевод» для тренировки." });
     }
+    if (testAttempts.length > 0 && testPct !== null && testPct >= 80) {
+      list.push({ icon: CheckCircle, accent: COOL, text: "Тема освоена (точность ≥ 80%). Отличный результат по тестам!" });
+    }
 
     const withTime = attempts.filter(a => a.time_ms && Number(a.time_ms) > 0);
     if (withTime.length >= 3) {

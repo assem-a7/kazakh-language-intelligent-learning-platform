@@ -1,8 +1,15 @@
 """
-main.py — QazaqAI FastAPI backend (Groq version)
+main.py — QazaqAI FastAPI backend
 Іске қосу: py -3.12 -m uvicorn main:app --reload --port 8000
+
+SETUP: API ключін .env файлына қой:
+  GROQ_API_KEY=gsk_...
+Немесе environment variable ретінде бер:
+  export GROQ_API_KEY=gsk_...
 """
-import os, sys, json
+import os
+import sys
+import json
 from datetime import datetime
 from typing import Optional
 
@@ -12,11 +19,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from model import KazakhAnswerModel
-from groq import Groq
 
-# ─── ОСЫ ЖЕРГЕ ӨЗ KEY-ІҢДІ ЖАЗ ──────────────────────────────────────────────
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")   # <-- мұнда өз gsk_... key-іңді қой
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── API KEY — environment variable арқылы ғана ──────────────────────────────
+# .env файлын қолданасың ба? pip install python-dotenv, сонан соң:
+# from dotenv import load_dotenv; load_dotenv()
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 SYSTEM_PROMPT = """Сен QazaqAI платформасының AI тьюторысың.
 Міндетің: қазақ тілін үйренетін орыс тілді пайдаланушыларға көмектесу.
@@ -47,9 +54,14 @@ SYSTEM_PROMPT = """Сен QazaqAI платформасының AI тьюторы
 
 groq_client = None
 
+
 def init_groq(api_key: str):
     global groq_client
+    if not api_key:
+        print("[startup] GROQ_API_KEY орнатылмаған — TF-IDF қолданылады")
+        return False
     try:
+        from groq import Groq
         client = Groq(api_key=api_key)
         client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -57,18 +69,26 @@ def init_groq(api_key: str):
             max_tokens=5,
         )
         groq_client = client
+        print("[startup] Groq AI дайын ✓")
         return True
+    except ImportError:
+        print("[startup] groq пакеті жоқ: pip install groq")
+        return False
     except Exception as e:
-        print(f"[groq] Қате: {e}")
-        groq_client = None
+        print(f"[startup] Groq қосылмады: {e} — TF-IDF қолданылады")
         return False
 
+
 # ─── App ──────────────────────────────────────────────────────────────────────
-app = FastAPI(title="QazaqAI Backend", version="3.0.0")
+app = FastAPI(title="QazaqAI Backend", version="3.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:4173", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:4173",
+        "http://127.0.0.1:5173",
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -81,16 +101,11 @@ if not model.is_trained:
     print("[startup] Модель оқытылуда...")
     model.train(DATA_PATH)
 
-if GROQ_API_KEY and GROQ_API_KEY != "gsk_...":
-    if init_groq(GROQ_API_KEY):
-        print("[startup] Groq AI дайын ✓")
-    else:
-        print("[startup] Groq қосылмады — TF-IDF қолданылады")
-else:
-    print("[startup] GROQ_API_KEY қойылмаған — TF-IDF қолданылады")
+init_groq(GROQ_API_KEY)
 
 session_log    = []
 prediction_log = []
+
 
 # ─── Схемалар ─────────────────────────────────────────────────────────────────
 class CheckAnswerRequest(BaseModel):
@@ -99,13 +114,16 @@ class CheckAnswerRequest(BaseModel):
     sentence_id:    Optional[int] = None
     topic:          Optional[str] = None
 
+
 class AskTutorRequest(BaseModel):
     question: str
     context:  Optional[str] = ""
 
+
 class LogSessionRequest(BaseModel):
     participant_id: str
     attempts:       list
+
 
 # ─── Эндпойнттар ──────────────────────────────────────────────────────────────
 @app.get("/api/health")
@@ -166,6 +184,11 @@ def check_answer(req: CheckAnswerRequest):
         "timestamp":  datetime.utcnow().isoformat(),
     })
     return result
+
+
+@app.post("/api/verify")
+def verify_answer(req: CheckAnswerRequest):
+    return check_answer(req)
 
 
 @app.get("/api/model-stats")

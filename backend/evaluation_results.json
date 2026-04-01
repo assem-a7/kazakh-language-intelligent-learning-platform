@@ -1,43 +1,27 @@
 {
   "model": "TF-IDF + cosine similarity",
   "vectorizer": "char_wb n-gram (2,4)",
+  "threshold": 0.65,
   "language": "Kazakh",
   "metrics": {
-    "accuracy": 0.6667,
-    "precision": 0.6923,
-    "recall": 0.5625,
-    "f1_score": 0.6207,
+    "accuracy": 0.7152,
+    "precision": 0.5692,
+    "recall": 0.7115,
+    "f1_score": 0.6325,
+    "auc_roc": 0.7923,
     "confusion_matrix": [
       [
-        13,
-        4
+        71,
+        28
       ],
       [
-        7,
-        9
+        15,
+        37
       ]
     ],
-    "n_train": 128,
-    "n_test": 33,
-    "n_total": 161
-  },
-  "topic_accuracy": {
-    "ablative": 0.6667,
-    "accusative": 0.5,
-    "adjective": 1.0,
-    "dative": 0.7778,
-    "future_tense": 1.0,
-    "genitive": 1.0,
-    "instrumental": 1.0,
-    "locative": 0.7692,
-    "negation": 0.8889,
-    "numerals": 0.8333,
-    "past_tense": 0.9524,
-    "plural": 0.9,
-    "possessive": 0.8889,
-    "present_tense": 0.7,
-    "question": 1.0,
-    "vowel_harmony": 0.6667,
-    "word_order": 0.3333
+    "n_train": 603,
+    "n_test": 151,
+    "n_total": 754,
+    "threshold": 0.65
   }
 }
