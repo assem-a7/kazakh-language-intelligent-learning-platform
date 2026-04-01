@@ -43,42 +43,9 @@ def load_pairs():
         raw = json.load(f)
     return raw.get("answer_pairs", []), raw.get("qa_knowledge", [])
 
-# ─── Гибридті векторизатор ───────────────────────────────────────────────────
-class HybridVectorizer:
-    """
-    char n-gram (3-5) + word n-gram (1-3) | word_weight=0.70 біріктіреді.
-    char: символ деңгейінде морфологиялық ұқсастық
-    word: сөз тәртібін ажыратады (word_order, adjective үшін маңызды)
-    """
-    def __init__(self, char_range=(3,5), word_range=(1,3), char_weight=0.30, word_weight=0.70):
-        self.char_vec = TfidfVectorizer(
-            analyzer="char_wb",
-            ngram_range=char_range,
-            min_df=1,
-            sublinear_tf=True,
-        )
-        self.word_vec = TfidfVectorizer(
-            analyzer="word",
-            ngram_range=word_range,
-            min_df=1,
-            sublinear_tf=True,
-        )
-        self.char_weight = char_weight
-        self.word_weight = word_weight
-
-    def fit(self, texts):
-        self.char_vec.fit(texts)
-        self.word_vec.fit(texts)
-        return self
-
-    def transform(self, texts):
-        char_m = self.char_vec.transform(texts) * self.char_weight
-        word_m = self.word_vec.transform(texts) * self.word_weight
-        return hstack([char_m, word_m])
-
-    def fit_transform(self, texts):
-        self.fit(texts)
-        return self.transform(texts)
+# ─── Гибридті векторизатор (model.py-ден импортталады) ──────────────────────
+# pickle дұрыс жүктелу үшін HybridVectorizer тек model.py-де анықталған
+from model import HybridVectorizer
 
 def build_vectorizer(char_range=(3,5), word_range=(1,3), char_w=0.30, word_w=0.70):
     return HybridVectorizer(char_range, word_range, char_w, word_w)
