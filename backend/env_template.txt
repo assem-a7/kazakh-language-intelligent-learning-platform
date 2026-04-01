@@ -1,0 +1,4 @@
+# ⚠️ БҰЛ ФАЙЛДЫ .env деп сақта (backend/ папкасына)
+# ⚠️ GitHub-қа push ЖАСАМА — .gitignore-да тұр
+
+GROQ_API_KEY=gsk_мұнда_өз_key_іңді_жаз

@@ -32,3 +32,4 @@ frontend/public/data/
 # Env/secrets
 .env
 .env.*
+backend/model.pkl

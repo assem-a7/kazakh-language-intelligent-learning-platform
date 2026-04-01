@@ -1,356 +1,242 @@
 """
-KazakhAnswerModel — TF-IDF + cosine similarity модель
-Қазақ тілі жаттығуларының жауаптарын тексеруге арналған
-
-ИСПРАВЛЕНИЯ v2:
-- Унифицирован порог τ=0.65 во всех методах (был 0.75 в train, 0.65 в check_answer)
-- Порог параметризован: SIMILARITY_THRESHOLD
-- Добавлен метод predict_batch() для baseline/ablation экспериментов
+model.py — QazaqAI Hybrid TF-IDF Model (v3.1)
+HybridVectorizer: char n-gram (3-5) + word n-gram (1-3)
 """
-import json
-import pickle
-import re
-import os
+import os, re, json, pickle
 import numpy as np
+from scipy.sparse import hstack
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score,
-    f1_score, confusion_matrix, roc_auc_score,
-)
 
-# ─── Единый порог — используется везде ───────────────────────────────────────
-SIMILARITY_THRESHOLD = 0.65   # τ (paper Section IV-A)
+BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "model.pkl")
 
-
-# ─── Нормализация ───────────────────────────────────────────────────────────
-SUFFIX_MAP = {
-    # Жатыс септік (местный)
-    "де$": "да", "те$": "та",
-    # Шығыс септік (исходный)
-    "ден$": "дан", "тен$": "тан", "нен$": "нан",
-    # Барыс септік (дательный)
-    "ге$": "га", "ке$": "ка",
-    # Табыс септік (винительный)
-    "ні$": "ны", "ді$": "ды", "ті$": "ты",
-    # Осы шақ (настоящее)
-    "еді$": "ады", "йді$": "йды",
-    # Өткен шақ (прошедшее)
-    "ді$": "ды", "ті$": "ты",
-    # Ілік (родительный)
-    "нің$": "ның", "дің$": "дың", "тің$": "тың",
-}
-
-
+# ─── Нормализация ─────────────────────────────────────────────────────────────
 def normalise(text: str) -> str:
-    """
-    4-stage Kazakh normalization pipeline (paper Section IV-B):
-    Stage 1: lowercase + trim
-    Stage 2: punctuation removal
-    Stage 3: unicode normalization (i → і)
-    Stage 4: whitespace collapse
-    """
-    if not text:
-        return ""
-    # Stage 1
-    text = text.strip().lower()
-    # Stage 2
-    text = re.sub(r"[.,!?;:\-–—\"'«»()]+", "", text)
-    # Stage 3
-    text = text.replace("i", "і")
-    # Stage 4
-    text = re.sub(r"\s+", " ", text).strip()
+    text = text.lower().strip()
+    text = re.sub(r'[.,!?;:«»""\'()\-–—_]', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-
-def suffix_normalise(text: str) -> str:
+# ─── Гибридті векторизатор ────────────────────────────────────────────────────
+class HybridVectorizer:
     """
-    Stage 4 extension: vowel harmony suffix normalization
-    Reduces orthographic variants to canonical form.
+    char n-gram (3-5) + word n-gram (1-3) біріктіреді.
+    char: морфологиялық ұқсастық (жалғаулар, аффикстер)
+    word: сөз тәртібін ажырату (word_order, adjective)
     """
-    result = normalise(text)
-    for pattern, replacement in SUFFIX_MAP.items():
-        result = re.sub(pattern, replacement, result)
-    return result
-
-
-# ─── Негізгі модель класы ────────────────────────────────────────────────────
-class KazakhAnswerModel:
-    MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.pkl")
-
-    def __init__(self, threshold: float = SIMILARITY_THRESHOLD,
-                 ngram_range: tuple = (2, 4),
-                 max_features: int = 10000):
-        """
-        Parameters
-        ----------
-        threshold    : cosine similarity decision boundary τ
-        ngram_range  : char_wb n-gram range (for ablation study)
-        max_features : TF-IDF vocabulary size (for ablation study)
-        """
-        self.threshold = threshold
-        self.vectorizer = TfidfVectorizer(
+    def __init__(self,
+                 char_range=(3, 5),
+                 word_range=(1, 3),
+                 char_weight=0.30,
+                 word_weight=0.70):
+        self.char_vec = TfidfVectorizer(
             analyzer="char_wb",
-            ngram_range=ngram_range,
+            ngram_range=char_range,
             min_df=1,
-            max_features=max_features,
             sublinear_tf=True,
         )
-        self.answer_vectors      = None
-        self.answer_labels_train = []
-        self.answer_texts        = []
-        self.answer_labels       = []
-
-        self.qa_vectorizer = TfidfVectorizer(
+        self.word_vec = TfidfVectorizer(
             analyzer="word",
-            ngram_range=(1, 3),
+            ngram_range=word_range,
             min_df=1,
-            max_features=8000,
             sublinear_tf=True,
         )
-        self.qa_vectors = None
-        self.qa_data    = []
+        self.char_weight = char_weight
+        self.word_weight = word_weight
 
-        self.is_trained = False
-        self.metrics    = {}
+    def fit(self, texts):
+        self.char_vec.fit(texts)
+        self.word_vec.fit(texts)
+        return self
 
-        if os.path.exists(self.MODEL_PATH):
-            self.load()
+    def transform(self, texts):
+        char_m = self.char_vec.transform(texts) * self.char_weight
+        word_m = self.word_vec.transform(texts) * self.word_weight
+        return hstack([char_m, word_m])
 
-    # ── Оқыту ─────────────────────────────────────────────────────────────────
-    def train(self, data_path: str) -> dict:
-        """Train model and return evaluation metrics for paper Table II."""
-        with open(data_path, encoding="utf-8") as f:
-            data = json.load(f)
+    def fit_transform(self, texts):
+        self.fit(texts)
+        return self.transform(texts)
 
-        # Build dataset
-        texts, labels = [], []
-        for pair in data["answer_pairs"]:
-            correct_norm = normalise(pair["correct"])
-            for variant in pair["variants"]:
-                v_norm = normalise(variant)
-                texts.append(v_norm)
-                labels.append(
-                    v_norm == correct_norm
-                    or suffix_normalise(v_norm) == suffix_normalise(pair["correct"])
-                )
+# ─── Негізгі модель класы ─────────────────────────────────────────────────────
+class KazakhAnswerModel:
+    def __init__(self):
+        self.vectorizer   = None
+        self.pairs        = []
+        self.qa_knowledge = []
+        self.threshold    = 0.55
+        self.version      = "3.1-hybrid"
+        self._loaded      = False
 
-        self.answer_texts  = texts
-        self.answer_labels = labels
+    # ── Жүктеу ──────────────────────────────────────────────────────────────
+    def load(self):
+        """model.pkl файлынан модельді жүктейді."""
+        if self._loaded:
+            return
+        if not os.path.exists(MODEL_PATH):
+            raise FileNotFoundError(
+                f"model.pkl табылмады: {MODEL_PATH}\n"
+                "Алдымен 'py -3.12 train.py' іске қосыңыз."
+            )
+        with open(MODEL_PATH, "rb") as f:
+            data = pickle.load(f)
+        self.vectorizer   = data["vectorizer"]
+        self.pairs        = data.get("pairs", [])
+        self.qa_knowledge = data.get("qa_knowledge", [])
+        self.threshold    = data.get("threshold", 0.55)
+        self.version      = data.get("version", "unknown")
+        self._loaded      = True
 
-        # Stratified 80/20 split
-        X_train, X_test, y_train, y_test = train_test_split(
-            texts, labels, test_size=0.2, random_state=42, stratify=labels
-        )
-
-        # Fit vectorizer on training data only
-        self.vectorizer.fit(X_train)
-        train_vecs = self.vectorizer.transform(X_train)
-        test_vecs  = self.vectorizer.transform(X_test)
-
-        self.answer_vectors      = train_vecs
-        self.answer_labels_train = y_train
-
-        # Predict using unified threshold τ
-        y_pred, y_scores = self._predict_vecs(test_vecs, train_vecs, y_train)
-
-        # Metrics
-        acc  = float(accuracy_score(y_test, y_pred))
-        prec = float(precision_score(y_test, y_pred, zero_division=0))
-        rec  = float(recall_score(y_test, y_pred, zero_division=0))
-        f1   = float(f1_score(y_test, y_pred, zero_division=0))
-        cm   = confusion_matrix(y_test, y_pred).tolist()
-        try:
-            auc = float(roc_auc_score(y_test, y_scores))
-        except Exception:
-            auc = None
-
-        self.metrics = {
-            "accuracy":         round(acc,  4),
-            "precision":        round(prec, 4),
-            "recall":           round(rec,  4),
-            "f1_score":         round(f1,   4),
-            "auc_roc":          round(auc, 4) if auc else None,
-            "confusion_matrix": cm,
-            "n_train":          len(X_train),
-            "n_test":           len(X_test),
-            "n_total":          len(texts),
-            "threshold":        self.threshold,
-        }
-
-        # QA tutor model
-        self.qa_data = data["qa_knowledge"]
-        qa_texts = [
-            f"{q['question']} {' '.join(q['keywords'])}"
-            for q in self.qa_data
-        ]
-        self.qa_vectorizer.fit(qa_texts)
-        self.qa_vectors = self.qa_vectorizer.transform(qa_texts)
-
-        self.is_trained = True
-        self.save()
-        return self.metrics
-
-    def _predict_vecs(self, test_vecs, train_vecs, y_train):
-        """Shared prediction logic using unified threshold τ."""
-        y_pred, y_scores = [], []
-        y_train_arr = list(y_train)
-        for vec in test_vecs:
-            sims    = cosine_similarity(vec, train_vecs)[0]
-            best_idx = int(np.argmax(sims))
-            best_sim = float(sims[best_idx])
-            y_scores.append(best_sim)
-            # Unified τ — same in train() and check_answer()
-            if best_sim >= self.threshold:
-                y_pred.append(y_train_arr[best_idx])
-            else:
-                y_pred.append(False)
-        return y_pred, y_scores
-
-    def predict_batch(self, texts: list) -> tuple:
-        """
-        Predict labels for a list of normalised texts.
-        Used by train.py for baseline comparison and ablation study.
-        Returns (y_pred, y_scores).
-        """
-        vecs = self.vectorizer.transform(texts)
-        return self._predict_vecs(vecs, self.answer_vectors, self.answer_labels_train)
-
-    # ── Жауап тексеру ─────────────────────────────────────────────────────────
+    # ── Жауапты тексеру ──────────────────────────────────────────────────────
     def check_answer(self, user_answer: str, correct_answer: str) -> dict:
-        """Check a single user answer. Unified threshold τ applied."""
+        """
+        Пайдаланушы жауабын дұрыс жауаппен салыстырады.
+        Қайтарады: score, is_correct, confidence, feedback
+        """
+        self.load()
+
         u_norm = normalise(user_answer)
         c_norm = normalise(correct_answer)
 
-        # 1. Exact match
+        # 1) Толық сәйкестік
         if u_norm == c_norm:
-            return {"score": 1.0, "is_correct": True, "confidence": "high"}
+            return {
+                "score":      1.0,
+                "is_correct": True,
+                "confidence": "high",
+                "feedback":   "Дұрыс! Жауабыңыз мінсіз сәйкес келді.",
+            }
 
-        # 2. Suffix-normalised match
-        if suffix_normalise(user_answer) == suffix_normalise(correct_answer):
-            return {"score": 0.95, "is_correct": True, "confidence": "high"}
+        # 2) TF-IDF cosine similarity
+        try:
+            u_vec = self.vectorizer.transform([u_norm])
+            c_vec = self.vectorizer.transform([c_norm])
+            score = float(cosine_similarity(u_vec, c_vec)[0][0])
+        except Exception:
+            score = 0.0
 
-        # 3. TF-IDF cosine similarity with unified τ
-        if self.is_trained:
-            try:
-                u_vec = self.vectorizer.transform([u_norm])
-                c_vec = self.vectorizer.transform([c_norm])
-                sim   = float(cosine_similarity(u_vec, c_vec)[0][0])
+        is_correct = score >= self.threshold
 
-                is_correct = sim >= self.threshold
-                confidence = (
-                    "high"   if sim >= 0.90 else
-                    "medium" if sim >= 0.72 else
-                    "low"
-                )
-                return {
-                    "score":      round(sim, 4),
-                    "is_correct": is_correct,
-                    "confidence": confidence,
-                }
-            except Exception:
-                pass
+        # Сенімділік деңгейі
+        if score >= 0.85:
+            confidence = "high"
+            feedback   = "Дұрыс! Жауабыңыз өте жақын."
+        elif score >= self.threshold:
+            confidence = "medium"
+            feedback   = f"Дұрыс, бірақ нақтылық жетіспейді. Дұрыс жауап: {correct_answer}"
+        elif score >= 0.35:
+            confidence = "low"
+            feedback   = f"Жауап жақын, бірақ қате. Дұрыс жауап: {correct_answer}"
+        else:
+            confidence = "low"
+            feedback   = f"Қате. Дұрыс жауап: {correct_answer}"
 
-        # 4. Character bigram fallback
-        sim = self._char_similarity(u_norm, c_norm)
         return {
-            "score":      round(sim, 4),
-            "is_correct": sim >= 0.80,
-            "confidence": "low",
+            "score":      round(score, 4),
+            "is_correct": is_correct,
+            "confidence": confidence,
+            "feedback":   feedback,
         }
 
-    # ── QA тьютор ─────────────────────────────────────────────────────────────
-    def get_answer(self, question: str, context: str = "") -> dict:
-        if not self.is_trained or self.qa_vectors is None:
+    # ── AI тьютор ────────────────────────────────────────────────────────────
+    def get_answer(self, question: str) -> dict:
+        """
+        qa_knowledge базасынан сұраққа жауап іздейді.
+        Қайтарады: answer, confidence, topic, found
+        """
+        self.load()
+
+        if not self.qa_knowledge:
             return {
-                "answer":     "Модель әлі жүктелмеген.",
+                "answer":     "Білім базасы бос. Деректерді тексеріңіз.",
                 "confidence": 0.0,
                 "topic":      "unknown",
-            }
-        q_clean = f"{normalise(question)} {normalise(context)}"
-        q_vec   = self.qa_vectorizer.transform([q_clean])
-        sims    = cosine_similarity(q_vec, self.qa_vectors)[0]
-        top_idx = int(np.argmax(sims))
-        top_sim = float(sims[top_idx])
-
-        if top_sim < 0.15:
-            return {
-                "answer": (
-                    "Кешіріңіз, бұл сұраққа нақты жауап таба алмадым. "
-                    "Қазақ грамматикасы туралы сұрақты нақтырақ қойып көріңіз."
-                ),
-                "confidence": round(top_sim, 4),
-                "topic":      "unknown",
+                "found":      False,
             }
 
-        best = self.qa_data[top_idx]
-        return {
-            "answer":     best["answer"],
-            "confidence": round(top_sim, 4),
-            "topic":      best["keywords"][0] if best["keywords"] else "general",
-        }
+        q_norm = normalise(question)
 
-    # ── Статистика ────────────────────────────────────────────────────────────
-    def get_stats(self) -> dict:
-        return {
-            "is_trained":     self.is_trained,
-            "accuracy":       self.metrics.get("accuracy", 0),
-            "f1_score":       self.metrics.get("f1_score", 0),
-            "precision":      self.metrics.get("precision", 0),
-            "recall":         self.metrics.get("recall", 0),
-            "auc_roc":        self.metrics.get("auc_roc"),
-            "threshold":      self.threshold,
-            "n_answer_pairs": len(self.answer_texts),
-            "n_qa_pairs":     len(self.qa_data),
-        }
+        # Keyword matching (жылдам)
+        keyword_match = None
+        best_kw_count = 0
+        for qa in self.qa_knowledge:
+            keywords = qa.get("keywords", [])
+            count = sum(1 for kw in keywords if kw.lower() in q_norm)
+            if count > best_kw_count:
+                best_kw_count = count
+                keyword_match = qa
 
-    # ── Сақтау/жүктеу ─────────────────────────────────────────────────────────
-    def save(self):
-        with open(self.MODEL_PATH, "wb") as f:
-            pickle.dump({
-                "vectorizer":          self.vectorizer,
-                "answer_vectors":      self.answer_vectors,
-                "answer_labels_train": self.answer_labels_train,
-                "qa_vectorizer":       self.qa_vectorizer,
-                "qa_vectors":          self.qa_vectors,
-                "qa_data":             self.qa_data,
-                "metrics":             self.metrics,
-                "is_trained":          self.is_trained,
-                "answer_texts":        self.answer_texts,
-                "answer_labels":       self.answer_labels,
-                "threshold":           self.threshold,
-            }, f)
-
-    def load(self):
+        # TF-IDF similarity (дәл)
         try:
-            with open(self.MODEL_PATH, "rb") as f:
-                d = pickle.load(f)
-            self.vectorizer          = d["vectorizer"]
-            self.answer_vectors      = d["answer_vectors"]
-            self.answer_labels_train = d["answer_labels_train"]
-            self.qa_vectorizer       = d["qa_vectorizer"]
-            self.qa_vectors          = d["qa_vectors"]
-            self.qa_data             = d["qa_data"]
-            self.metrics             = d["metrics"]
-            self.is_trained          = d["is_trained"]
-            self.answer_texts        = d.get("answer_texts", [])
-            self.answer_labels       = d.get("answer_labels", [])
-            self.threshold           = d.get("threshold", SIMILARITY_THRESHOLD)
-        except Exception as e:
-            print(f"[model] Жүктеу қатесі: {e}")
-            self.is_trained = False
+            qa_texts = [normalise(qa["question"]) for qa in self.qa_knowledge]
+            qa_vecs  = self.vectorizer.transform(qa_texts)
+            q_vec    = self.vectorizer.transform([q_norm])
+            sims     = cosine_similarity(q_vec, qa_vecs)[0]
+            best_idx = int(np.argmax(sims))
+            best_sim = float(sims[best_idx])
+        except Exception:
+            best_sim = 0.0
+            best_idx = 0
 
-    @staticmethod
-    def _char_similarity(a: str, b: str) -> float:
-        """Dice bigram similarity — character-level fallback."""
-        if not a or not b:
-            return 0.0
-        if a == b:
-            return 1.0
-        def bigrams(s):
-            return set(s[i:i+2] for i in range(len(s) - 1))
-        ba, bb = bigrams(a), bigrams(b)
-        if not ba or not bb:
-            return 0.0
-        return 2 * len(ba & bb) / (len(ba) + len(bb))
+        # Екеуін біріктіру
+        if best_sim >= 0.25:
+            best_qa = self.qa_knowledge[best_idx]
+            confidence = best_sim
+        elif keyword_match and best_kw_count >= 1:
+            best_qa    = keyword_match
+            confidence = 0.45 + best_kw_count * 0.05
+        else:
+            return {
+                "answer":     (
+                    "Кешіріңіз, бұл сұраққа жауап таба алмадым. "
+                    "Сұрақты басқаша жазып көріңіз немесе "
+                    "Грамматика бөліміндегі ережелерді қараңыз."
+                ),
+                "confidence": 0.0,
+                "topic":      "not_found",
+                "found":      False,
+            }
+
+        return {
+            "answer":     best_qa["answer"],
+            "confidence": round(min(confidence, 1.0), 4),
+            "topic":      best_qa.get("topic", best_qa.get("question", "")[:30]),
+            "found":      True,
+        }
+
+    # ── Модель статистикасы ──────────────────────────────────────────────────
+    def get_stats(self) -> dict:
+        """Модель метрикаларын қайтарады (evaluation_results.json-нан)."""
+        self.load()
+        eval_path = os.path.join(BASE_DIR, "evaluation_results.json")
+        if os.path.exists(eval_path):
+            with open(eval_path, encoding="utf-8") as f:
+                data = json.load(f)
+            return {
+                "model_version":     self.version,
+                "features":          data.get("features", "char(3-5)+word(1-3)"),
+                "cross_validation":  data.get("cross_validation", {}),
+                "final_metrics":     data.get("final_metrics", {}),
+                "per_topic":         data.get("per_topic_accuracy", {}),
+                "total_pairs":       len(self.pairs),
+                "total_qa":          len(self.qa_knowledge),
+                "threshold":         self.threshold,
+            }
+        return {
+            "model_version": self.version,
+            "total_pairs":   len(self.pairs),
+            "total_qa":      len(self.qa_knowledge),
+            "threshold":     self.threshold,
+            "note":          "evaluation_results.json табылмады",
+        }
+
+    # ── Lazy singleton ───────────────────────────────────────────────────────
+    _instance = None
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+            cls._instance.load()
+        return cls._instance

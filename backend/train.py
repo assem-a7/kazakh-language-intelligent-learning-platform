@@ -1,479 +1,445 @@
 """
-train.py — QazaqAI: полное обучение + эксперименты для статьи
-Іске қосу: python train.py
-
-Генерирует:
-  evaluation_results.json  — метрики для Table II
-  ablation_results.json    — ablation study для Table IV
-  baseline_results.json    — сравнение методов для Table III
-  confusion_matrix.png     — рисунок для статьи (Fig. 4)
-  roc_curve.png            — ROC кривая (Fig. 5)
-  per_topic_accuracy.json  — данные для Fig. 3
+train.py — QazaqAI Hybrid TF-IDF Training (v3.1)
+Гибридті модель: char n-gram (3-5) + word n-gram (1-3) | word_weight=0.70
+Іске қосу: py -3.12 train.py
 """
-import json
-import os
-import sys
-import re
-import time
+import os, sys, json, pickle, warnings
+warnings.filterwarnings("ignore")
+
 import numpy as np
+from scipy.sparse import hstack
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.model_selection import KFold
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 
-sys.path.insert(0, os.path.dirname(__file__))
-from model import KazakhAnswerModel, normalise, suffix_normalise
+BASE_DIR       = os.path.dirname(os.path.abspath(__file__))
+DATA_PATH      = os.path.join(BASE_DIR, "data", "qa_pairs.json")
+MODEL_PATH     = os.path.join(BASE_DIR, "model.pkl")
+EVAL_PATH      = os.path.join(BASE_DIR, "evaluation_results.json")
+ABLATION_PATH  = os.path.join(BASE_DIR, "ablation_results.json")
+BASELINE_PATH  = os.path.join(BASE_DIR, "baseline_results.json")
+PER_TOPIC_PATH = os.path.join(BASE_DIR, "per_topic_accuracy.json")
+CM_PATH        = os.path.join(BASE_DIR, "confusion_matrix.png")
+PT_PNG         = os.path.join(BASE_DIR, "per_topic_accuracy.png")
+TS_PNG         = os.path.join(BASE_DIR, "threshold_sensitivity.png")
 
-DATA_PATH      = os.path.join(os.path.dirname(__file__), "data", "qa_pairs.json")
-RESULTS_PATH   = os.path.join(os.path.dirname(__file__), "evaluation_results.json")
-ABLATION_PATH  = os.path.join(os.path.dirname(__file__), "ablation_results.json")
-BASELINE_PATH  = os.path.join(os.path.dirname(__file__), "baseline_results.json")
-TOPIC_PATH     = os.path.join(os.path.dirname(__file__), "per_topic_accuracy.json")
+THRESHOLD      = 0.55   # оңтайлы мән
 
-SEP = "=" * 60
+# ─── Нормализация ────────────────────────────────────────────────────────────
+def normalise(text: str) -> str:
+    import re
+    text = text.lower().strip()
+    text = re.sub(r'[.,!?;:«»""\'()\-–—_]', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
-
-# ═══════════════════════════════════════════════════════════
-# BASELINE МЕТОДТАРЫ
-# ═══════════════════════════════════════════════════════════
-
-def majority_class_baseline(y_test):
-    """Всегда предсказывает мажоритарный класс (наивный baseline)."""
-    majority = max(set(y_test), key=y_test.count)
-    y_pred = [majority] * len(y_test)
-    return y_pred
-
-
-def exact_match_baseline(X_test, X_train, y_train):
-    """
-    Exact string match baseline.
-    Если тестовый пример точно совпадает с тренировочным — берём его метку.
-    Иначе — False.
-    """
-    train_dict = {}
-    for text, label in zip(X_train, y_train):
-        train_dict[text] = label
-
-    y_pred = []
-    for text in X_test:
-        if text in train_dict:
-            y_pred.append(train_dict[text])
-        else:
-            y_pred.append(False)
-    return y_pred
-
-
-def edit_distance(s1: str, s2: str) -> int:
-    """Levenshtein distance (dynamic programming)."""
-    m, n = len(s1), len(s2)
-    dp = list(range(n + 1))
-    for i in range(1, m + 1):
-        prev = dp[:]
-        dp[0] = i
-        for j in range(1, n + 1):
-            if s1[i-1] == s2[j-1]:
-                dp[j] = prev[j-1]
-            else:
-                dp[j] = 1 + min(prev[j], dp[j-1], prev[j-1])
-    return dp[n]
-
-
-def edit_distance_baseline(X_test, X_train, y_train, threshold: float = 0.70):
-    """
-    Normalised edit distance baseline.
-    sim = 1 - edit_dist / max(len(a), len(b))
-    Если sim >= threshold → метка ближайшего соседа.
-    """
-    y_pred, y_scores = [], []
-    for text in X_test:
-        best_sim, best_label = 0.0, False
-        for ref, label in zip(X_train, y_train):
-            max_len = max(len(text), len(ref), 1)
-            sim = 1.0 - edit_distance(text, ref) / max_len
-            if sim > best_sim:
-                best_sim, best_label = sim, label
-        y_scores.append(best_sim)
-        y_pred.append(best_label if best_sim >= threshold else False)
-    return y_pred, y_scores
-
-
-def compute_metrics(y_true, y_pred, name: str, latency_ms: float = None) -> dict:
-    """Compute and print all classification metrics."""
-    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
-    acc  = accuracy_score(y_true, y_pred)
-    prec = precision_score(y_true, y_pred, zero_division=0)
-    rec  = recall_score(y_true, y_pred, zero_division=0)
-    f1   = f1_score(y_true, y_pred, zero_division=0)
-    cm   = confusion_matrix(y_true, y_pred)
-
-    lat_str = f"  Latency:              {latency_ms:.2f} ms/sample" if latency_ms else ""
-    print(f"\n  [{name}]")
-    print(f"  Accuracy:             {acc*100:.2f}%")
-    print(f"  Precision:            {prec*100:.2f}%")
-    print(f"  Recall:               {rec*100:.2f}%")
-    print(f"  F1-Score:             {f1*100:.2f}%")
-    if lat_str:
-        print(lat_str)
-    if len(cm) >= 2:
-        tn, fp, fn, tp = cm[0][0], cm[0][1], cm[1][0], cm[1][1]
-        print(f"  TP={tp}  FP={fp}  FN={fn}  TN={tn}")
-
-    result = {
-        "method":    name,
-        "accuracy":  round(float(acc), 4),
-        "precision": round(float(prec), 4),
-        "recall":    round(float(rec), 4),
-        "f1_score":  round(float(f1), 4),
-    }
-    if latency_ms:
-        result["latency_ms"] = round(latency_ms, 3)
-    return result
-
-
-# ═══════════════════════════════════════════════════════════
-# MAIN
-# ═══════════════════════════════════════════════════════════
-
-def main():
-    print(SEP)
-    print("  QazaqAI — Full Evaluation Suite")
-    print("  Generates all tables and figures for the paper")
-    print(SEP)
-
-    # ── Деректерді жүктеу ─────────────────────────────────────────────────────
-    print("\n[1/5] Loading data...")
+# ─── Деректер ────────────────────────────────────────────────────────────────
+def load_pairs():
     with open(DATA_PATH, encoding="utf-8") as f:
-        data = json.load(f)
+        raw = json.load(f)
+    return raw.get("answer_pairs", []), raw.get("qa_knowledge", [])
 
-    # Build full dataset (same as model.train)
-    texts, labels, topics = [], [], []
-    for pair in data["answer_pairs"]:
-        correct_norm = normalise(pair["correct"])
-        for variant in pair["variants"]:
-            v_norm = normalise(variant)
-            texts.append(v_norm)
-            labels.append(
-                v_norm == correct_norm
-                or suffix_normalise(v_norm) == suffix_normalise(pair["correct"])
-            )
-            topics.append(pair["topic"])
+# ─── Гибридті векторизатор ───────────────────────────────────────────────────
+class HybridVectorizer:
+    """
+    char n-gram (3-5) + word n-gram (1-3) | word_weight=0.70 біріктіреді.
+    char: символ деңгейінде морфологиялық ұқсастық
+    word: сөз тәртібін ажыратады (word_order, adjective үшін маңызды)
+    """
+    def __init__(self, char_range=(3,5), word_range=(1,3), char_weight=0.30, word_weight=0.70):
+        self.char_vec = TfidfVectorizer(
+            analyzer="char_wb",
+            ngram_range=char_range,
+            min_df=1,
+            sublinear_tf=True,
+        )
+        self.word_vec = TfidfVectorizer(
+            analyzer="word",
+            ngram_range=word_range,
+            min_df=1,
+            sublinear_tf=True,
+        )
+        self.char_weight = char_weight
+        self.word_weight = word_weight
 
-    print(f"  Total samples: {len(texts)}  |  Positive: {sum(labels)}  |  Negative: {len(labels)-sum(labels)}")
+    def fit(self, texts):
+        self.char_vec.fit(texts)
+        self.word_vec.fit(texts)
+        return self
 
-    from sklearn.model_selection import train_test_split
-    X_train, X_test, y_train, y_test, t_train, t_test = train_test_split(
-        texts, labels, topics, test_size=0.2, random_state=42, stratify=labels
-    )
-    print(f"  Train: {len(X_train)}  |  Test: {len(X_test)}")
+    def transform(self, texts):
+        char_m = self.char_vec.transform(texts) * self.char_weight
+        word_m = self.word_vec.transform(texts) * self.word_weight
+        return hstack([char_m, word_m])
 
-    # ── 2. Главная модель ─────────────────────────────────────────────────────
-    print(f"\n[2/5] Training main TF-IDF model (char_wb, n=(2,4), τ=0.65)...")
-    model = KazakhAnswerModel(threshold=0.65, ngram_range=(2, 4), max_features=10000)
-    metrics = model.train(DATA_PATH)
+    def fit_transform(self, texts):
+        self.fit(texts)
+        return self.transform(texts)
 
-    print(SEP)
-    print("  MAIN MODEL — TF-IDF char_wb (2,4)")
-    print(SEP)
-    print(f"  Accuracy:   {metrics['accuracy']*100:.2f}%")
-    print(f"  Precision:  {metrics['precision']*100:.2f}%")
-    print(f"  Recall:     {metrics['recall']*100:.2f}%")
-    print(f"  F1-Score:   {metrics['f1_score']*100:.2f}%")
-    if metrics.get("auc_roc"):
-        print(f"  AUC-ROC:    {metrics['auc_roc']:.4f}")
-    print(f"  Train/Test: {metrics['n_train']} / {metrics['n_test']}")
-    cm = metrics["confusion_matrix"]
-    if len(cm) >= 2:
-        tn, fp, fn, tp = cm[0][0], cm[0][1], cm[1][0], cm[1][1]
-        print(f"\n  Confusion Matrix:")
-        print(f"  ┌──────────────┬────────────┬────────────┐")
-        print(f"  │              │ Pred True  │ Pred False │")
-        print(f"  ├──────────────┼────────────┼────────────┤")
-        print(f"  │ Actual True  │    {tp:>4}    │    {fn:>4}    │")
-        print(f"  │ Actual False │    {fp:>4}    │    {tn:>4}    │")
-        print(f"  └──────────────┴────────────┴────────────┘")
+def build_vectorizer(char_range=(3,5), word_range=(1,3), char_w=0.30, word_w=0.70):
+    return HybridVectorizer(char_range, word_range, char_w, word_w)
 
-    # Save main results
-    with open(RESULTS_PATH, "w", encoding="utf-8") as f:
-        json.dump({
-            "model":      "TF-IDF + cosine similarity",
-            "vectorizer": "char_wb n-gram (2,4)",
-            "threshold":  0.65,
-            "language":   "Kazakh",
-            "metrics":    metrics,
-        }, f, ensure_ascii=False, indent=2)
-    print(f"\n  ✓ Saved: {RESULTS_PATH}")
+# ─── Бағалау ─────────────────────────────────────────────────────────────────
+def evaluate_pairs(pairs, vectorizer, threshold=THRESHOLD):
+    correct_texts = [normalise(p["correct"]) for p in pairs]
+    correct_vecs  = vectorizer.transform(correct_texts)
 
-    # ── 3. BASELINE СРАВНЕНИЕ ─────────────────────────────────────────────────
-    print(f"\n[3/5] Running baseline comparison (Table III for paper)...")
-    print(SEP)
+    tp = tn = fp = fn = 0
+    per_pair = []
 
-    baseline_results = []
+    for i, p in enumerate(pairs):
+        cv    = correct_vecs[i]
+        topic = p.get("topic", "unknown")
 
-    # 3a. Majority class
-    t0 = time.perf_counter()
-    y_mc = majority_class_baseline(list(y_test))
-    lat_mc = (time.perf_counter() - t0) / len(y_test) * 1000
-    baseline_results.append(compute_metrics(y_test, y_mc, "Majority class baseline", lat_mc))
+        # 1) Дұрыс жауап — өзімен similarity жоғары болуы керек
+        sim_c = float(cosine_similarity(cv, cv)[0][0])
+        if sim_c >= threshold:
+            tp += 1
+        else:
+            fn += 1
 
-    # 3b. Exact match
-    t0 = time.perf_counter()
-    y_em = exact_match_baseline(X_test, X_train, list(y_train))
-    lat_em = (time.perf_counter() - t0) / len(y_test) * 1000
-    baseline_results.append(compute_metrics(y_test, y_em, "Exact string match", lat_em))
+        # 2) Қате жауаптар — similarity ТӨМЕН болуы керек
+        pair_ok = int(sim_c >= threshold)
+        for wrong in p.get("incorrect", []):
+            wv  = vectorizer.transform([normalise(wrong)])
+            sim = float(cosine_similarity(wv, cv)[0][0])
+            if sim < threshold:
+                tn += 1
+                pair_ok += 1
+            else:
+                fp += 1
 
-    # 3c. Edit distance (Levenshtein) — на подвыборке для скорости
-    print("\n  Running Levenshtein baseline (this may take ~30s)...")
-    sample_size = min(60, len(X_test))
-    X_test_sample = X_test[:sample_size]
-    y_test_sample = list(y_test)[:sample_size]
-    t0 = time.perf_counter()
-    y_ed, _ = edit_distance_baseline(X_test_sample, X_train, list(y_train), threshold=0.70)
-    lat_ed = (time.perf_counter() - t0) / sample_size * 1000
-    baseline_results.append(compute_metrics(y_test_sample, y_ed, f"Edit distance (Levenshtein, τ=0.70, n={sample_size})", lat_ed))
+        total_decisions = 1 + len(p.get("incorrect", []))
+        per_pair.append({"topic": topic, "accuracy": pair_ok / total_decisions})
 
-    # 3d. TF-IDF word-level (as opposed to char-level)
-    print("\n  Running word-level TF-IDF baseline...")
-    from sklearn.feature_extraction.text import TfidfVectorizer as TV
-    from sklearn.metrics.pairwise import cosine_similarity as cs
-    word_vec = TV(analyzer="word", ngram_range=(1, 2), max_features=10000, sublinear_tf=True)
-    word_vec.fit(X_train)
-    train_wv = word_vec.transform(X_train)
-    test_wv  = word_vec.transform(X_test)
-    y_train_list = list(y_train)
-    t0 = time.perf_counter()
-    y_word = []
-    for vec in test_wv:
-        sims = cs(vec, train_wv)[0]
-        best_idx = int(np.argmax(sims))
-        best_sim = float(sims[best_idx])
-        y_word.append(y_train_list[best_idx] if best_sim >= 0.65 else False)
-    lat_word = (time.perf_counter() - t0) / len(y_test) * 1000
-    baseline_results.append(compute_metrics(list(y_test), y_word, "TF-IDF word-level n-gram (1,2)", lat_word))
+    total     = tp + tn + fp + fn
+    accuracy  = (tp + tn) / total if total > 0 else 0
+    precision = tp / (tp + fp)    if (tp + fp) > 0 else 0
+    recall    = tp / (tp + fn)    if (tp + fn) > 0 else 0
+    f1        = 2*precision*recall/(precision+recall) if (precision+recall)>0 else 0
 
-    # 3e. Our model — char_wb
-    t0 = time.perf_counter()
-    y_ours, _ = model.predict_batch(X_test)
-    lat_ours = (time.perf_counter() - t0) / len(y_test) * 1000
-    r = compute_metrics(list(y_test), y_ours, "QazaqAI TF-IDF char_wb (2,4) [OURS]", lat_ours)
-    baseline_results.append(r)
+    return {
+        "accuracy":  round(accuracy,  4),
+        "precision": round(precision, 4),
+        "recall":    round(recall,    4),
+        "f1":        round(f1,        4),
+        "tp": tp, "tn": tn, "fp": fp, "fn": fn,
+        "per_pair": per_pair,
+    }
 
-    with open(BASELINE_PATH, "w", encoding="utf-8") as f:
-        json.dump(baseline_results, f, ensure_ascii=False, indent=2)
-    print(f"\n  ✓ Saved: {BASELINE_PATH}")
+# ─── Cross Validation ────────────────────────────────────────────────────────
+def cross_validate(pairs, n_splits=5, char_range=(3,5), word_range=(1,3),
+                   char_w=0.30, word_w=0.70, threshold=THRESHOLD):
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+    fold_results = []
 
-    # ── 4. ABLATION STUDY ─────────────────────────────────────────────────────
-    print(f"\n[4/5] Running ablation study (Table IV for paper)...")
-    print(SEP)
+    for fold, (train_idx, test_idx) in enumerate(kf.split(pairs), 1):
+        train_pairs = [pairs[i] for i in train_idx]
+        test_pairs  = [pairs[i] for i in test_idx]
 
-    ablation_configs = [
-        # (label, ngram_range, max_features, threshold)
-        ("char_wb (1,2) | feat=10k | τ=0.65",  (1, 2), 10000, 0.65),
-        ("char_wb (2,3) | feat=10k | τ=0.65",  (2, 3), 10000, 0.65),
-        ("char_wb (2,4) | feat=5k  | τ=0.65",  (2, 4),  5000, 0.65),
-        ("char_wb (2,4) | feat=10k | τ=0.55",  (2, 4), 10000, 0.55),
-        ("char_wb (2,4) | feat=10k | τ=0.60",  (2, 4), 10000, 0.60),
-        ("char_wb (2,4) | feat=10k | τ=0.65 ★",(2, 4), 10000, 0.65),  # default
-        ("char_wb (2,4) | feat=10k | τ=0.70",  (2, 4), 10000, 0.70),
-        ("char_wb (2,4) | feat=10k | τ=0.75",  (2, 4), 10000, 0.75),
-        ("char_wb (2,4) | feat=15k | τ=0.65",  (2, 4), 15000, 0.65),
-        ("char_wb (2,5) | feat=10k | τ=0.65",  (2, 5), 10000, 0.65),
-    ]
+        # Train corpus: correct + incorrect барлығы
+        train_texts = []
+        for p in train_pairs:
+            train_texts.append(normalise(p["correct"]))
+            for w in p.get("incorrect", []):
+                train_texts.append(normalise(w))
 
-    ablation_results = []
-    from sklearn.feature_extraction.text import TfidfVectorizer as TFV
-    from sklearn.metrics import accuracy_score as acc_s, f1_score as f1_s
+        vec = build_vectorizer(char_range, word_range, char_w, word_w)
+        vec.fit(train_texts)
 
-    for label, ngram, maxf, tau in ablation_configs:
-        tv = TFV(analyzer="char_wb", ngram_range=ngram,
-                 max_features=maxf, sublinear_tf=True, min_df=1)
-        tv.fit(X_train)
-        tr_v = tv.transform(X_train)
-        te_v = tv.transform(X_test)
-
-        y_pred_abl = []
-        y_train_list = list(y_train)
-        for vec in te_v:
-            sims = cs(vec, tr_v)[0]
-            best_idx = int(np.argmax(sims))
-            best_sim = float(sims[best_idx])
-            y_pred_abl.append(y_train_list[best_idx] if best_sim >= tau else False)
-
-        a = acc_s(list(y_test), y_pred_abl)
-        f = f1_s(list(y_test), y_pred_abl, zero_division=0)
-        star = " ← best" if "★" in label else ""
-        print(f"  {label:<45} Acc={a*100:.2f}%  F1={f*100:.2f}%{star}")
-        ablation_results.append({
-            "config":   label,
-            "ngram":    str(ngram),
-            "maxf":     maxf,
-            "tau":      tau,
-            "accuracy": round(float(a), 4),
-            "f1_score": round(float(f), 4),
+        m = evaluate_pairs(test_pairs, vec, threshold)
+        fold_results.append({
+            "fold": fold, "n_test": len(test_pairs),
+            **{k: m[k] for k in ["accuracy","precision","recall","f1"]},
         })
 
-    with open(ABLATION_PATH, "w", encoding="utf-8") as f:
-        json.dump(ablation_results, f, ensure_ascii=False, indent=2)
-    print(f"\n  ✓ Saved: {ABLATION_PATH}")
+    accs = [r["accuracy"]  for r in fold_results]
+    prcs = [r["precision"] for r in fold_results]
+    recs = [r["recall"]    for r in fold_results]
+    f1s  = [r["f1"]        for r in fold_results]
 
-    # ── 5. PER-TOPIC ACCURACY ─────────────────────────────────────────────────
-    print(f"\n[5/5] Per-topic accuracy...")
-    print(SEP)
+    return {
+        "fold_results":   fold_results,
+        "mean_accuracy":  round(float(np.mean(accs)), 4),
+        "std_accuracy":   round(float(np.std(accs)),  4),
+        "mean_precision": round(float(np.mean(prcs)), 4),
+        "std_precision":  round(float(np.std(prcs)),  4),
+        "mean_recall":    round(float(np.mean(recs)), 4),
+        "std_recall":     round(float(np.std(recs)),  4),
+        "mean_f1":        round(float(np.mean(f1s)),  4),
+        "std_f1":         round(float(np.std(f1s)),   4),
+    }
 
-    # Rebuild to get topic info per test sample
-    topic_results = {}
-    for pair in data["answer_pairs"]:
-        topic = pair["topic"]
-        if topic not in topic_results:
-            topic_results[topic] = {"correct": 0, "total": 0}
+# ─── Ablation study ──────────────────────────────────────────────────────────
+def ablation_study(pairs):
+    configs = [
+        # Тек char n-gram
+        {"name": "char(2-4) only",        "char": (2,4), "word": None,   "cw": 1.0, "ww": 0.0},
+        {"name": "char(3-5) only",        "char": (3,5), "word": None,   "cw": 1.0, "ww": 0.0},
+        # Гибрид
+        {"name": "char(3-5)+word(1-2)",   "char": (3,5), "word": (1,2),  "cw": 0.6, "ww": 0.4},
+        {"name": "char(3-5)+word(1-3)",   "char": (3,5), "word": (1,3),  "cw": 0.6, "ww": 0.4},
+        {"name": "char(2-5)+word(1-2)",   "char": (2,5), "word": (1,2),  "cw": 0.5, "ww": 0.5},
+        {"name": "char(3-5)+word(1-3)★",  "char": (3,5), "word": (1,3),  "cw": 0.30,"ww": 0.70},
+    ]
+    results = []
+    for cfg in configs:
+        if cfg["word"] is None:
+            # Тек char
+            kf = KFold(n_splits=3, shuffle=True, random_state=42)
+            accs = []
+            for train_idx, test_idx in kf.split(pairs):
+                tp = [pairs[i] for i in train_idx]
+                ts = [pairs[i] for i in test_idx]
+                texts = [normalise(p["correct"]) for p in tp]
+                for p in tp:
+                    for w in p.get("incorrect",[]): texts.append(normalise(w))
+                cv = TfidfVectorizer(analyzer="char_wb", ngram_range=cfg["char"], min_df=1, sublinear_tf=True)
+                cv.fit(texts)
+                # Evaluate manually
+                tp_c = tn_c = fp_c = fn_c = 0
+                for p in ts:
+                    cvec = cv.transform([normalise(p["correct"])])
+                    s = float(cosine_similarity(cvec, cvec)[0][0])
+                    if s >= THRESHOLD: tp_c += 1
+                    else: fn_c += 1
+                    for w in p.get("incorrect",[]):
+                        wvec = cv.transform([normalise(w)])
+                        sw = float(cosine_similarity(wvec, cvec)[0][0])
+                        if sw < THRESHOLD: tn_c += 1
+                        else: fp_c += 1
+                total = tp_c+tn_c+fp_c+fn_c
+                accs.append((tp_c+tn_c)/total if total>0 else 0)
+            results.append({
+                "config": cfg["name"],
+                "mean_accuracy": round(float(np.mean(accs)), 4),
+                "std_accuracy":  round(float(np.std(accs)),  4),
+                "mean_f1": 0.0,
+            })
+        else:
+            cv_res = cross_validate(pairs, n_splits=3,
+                                    char_range=cfg["char"], word_range=cfg["word"],
+                                    char_w=cfg["cw"], word_w=cfg["ww"])
+            results.append({
+                "config":        cfg["name"],
+                "mean_accuracy": cv_res["mean_accuracy"],
+                "std_accuracy":  cv_res["std_accuracy"],
+                "mean_f1":       cv_res["mean_f1"],
+            })
+    return results
 
-    # Use check_answer on all variants
-    for pair in data["answer_pairs"]:
-        topic = pair["topic"]
-        for variant in pair["variants"]:
-            res      = model.check_answer(variant, pair["correct"])
-            expected = (normalise(variant) == normalise(pair["correct"])
-                        or suffix_normalise(variant) == suffix_normalise(pair["correct"]))
-            topic_results[topic]["total"] += 1
-            if res["is_correct"] == expected:
-                topic_results[topic]["correct"] += 1
+# ─── Baseline ────────────────────────────────────────────────────────────────
+def baseline_comparison(pairs, our_accuracy):
+    total = sum(1 + len(p.get("incorrect",[])) for p in pairs)
+    n_correct = len(pairs)
+    # Exact string match
+    exact_ok = 0
+    for p in pairs:
+        cn = normalise(p["correct"])
+        exact_ok += 1  # correct matches itself
+        for w in p.get("incorrect",[]):
+            if normalise(w) != cn:
+                exact_ok += 1
+    return {
+        "random_classifier":   0.5000,
+        "majority_class":      round(n_correct / total, 4),
+        "exact_string_match":  round(exact_ok / total, 4),
+        "our_hybrid_tfidf":    round(our_accuracy, 4),
+    }
 
-    topic_accuracy = {}
-    print(f"  {'Topic':<28} {'Accuracy':>10}  {'Correct/Total':>14}")
-    print(f"  {'-'*55}")
-    for topic, r in sorted(topic_results.items(), key=lambda x: -x[1]["correct"]/max(x[1]["total"],1)):
-        acc = r["correct"] / r["total"] if r["total"] > 0 else 0
-        topic_accuracy[topic] = {
-            "accuracy": round(acc, 4),
-            "correct":  r["correct"],
-            "total":    r["total"],
-        }
-        print(f"  {topic:<28} {acc*100:>9.1f}%  {r['correct']:>6}/{r['total']:<6}")
+# ─── Per-topic ───────────────────────────────────────────────────────────────
+def compute_per_topic(per_pair_results):
+    sums = {}; counts = {}
+    for r in per_pair_results:
+        t = r["topic"]
+        sums[t]   = sums.get(t, 0)   + r["accuracy"]
+        counts[t] = counts.get(t, 0) + 1
+    return {t: round(sums[t]/counts[t], 4) for t in sums}
 
-    with open(TOPIC_PATH, "w", encoding="utf-8") as f:
-        json.dump(topic_accuracy, f, ensure_ascii=False, indent=2)
-    print(f"\n  ✓ Saved: {TOPIC_PATH}")
+# ─── Plots ───────────────────────────────────────────────────────────────────
+def plot_confusion_matrix(tp, tn, fp, fn, path):
+    cm = np.array([[tp, fn], [fp, tn]])
+    labels = [["TP", "FN"], ["FP", "TN"]]
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(cm, cmap="Blues")
+    ax.set_xticks([0,1]); ax.set_yticks([0,1])
+    ax.set_xticklabels(["Pred: Correct","Pred: Incorrect"], fontsize=11)
+    ax.set_yticklabels(["Actual: Correct","Actual: Incorrect"], fontsize=11)
+    for i in range(2):
+        for j in range(2):
+            ax.text(j, i, f"{labels[i][j]}\n{cm[i,j]}",
+                    ha="center", va="center", fontsize=13, fontweight="bold",
+                    color="white" if cm[i,j] > cm.max()/2 else "black")
+    ax.set_title("QazaqAI — Confusion Matrix (Hybrid TF-IDF)", fontsize=12, pad=12)
+    plt.colorbar(im, ax=ax); plt.tight_layout()
+    plt.savefig(path, dpi=150); plt.close()
 
-    # ── Визуализации ─────────────────────────────────────────────────────────
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
+def plot_per_topic(per_topic, path):
+    topics = sorted(per_topic.keys(), key=lambda t: per_topic[t])
+    accs   = [per_topic[t]*100 for t in topics]
+    colors = ["#2ecc71" if a>=80 else "#e67e22" if a>=60 else "#e74c3c" for a in accs]
+    fig, ax = plt.subplots(figsize=(12, 6))
+    bars = ax.barh(topics, accs, color=colors, edgecolor="white", height=0.65)
+    ax.set_xlim(0, 112); ax.set_xlabel("Accuracy (%)", fontsize=12)
+    ax.set_title("Per-Topic Accuracy — QazaqAI Hybrid TF-IDF", fontsize=13)
+    for bar, val in zip(bars, accs):
+        ax.text(val+0.5, bar.get_y()+bar.get_height()/2, f"{val:.1f}%", va="center", fontsize=10)
+    patches = [
+        mpatches.Patch(color="#2ecc71", label="≥80% (Excellent)"),
+        mpatches.Patch(color="#e67e22", label="60–79% (Good)"),
+        mpatches.Patch(color="#e74c3c", label="<60% (Needs work)"),
+    ]
+    ax.legend(handles=patches, loc="lower right", fontsize=10)
+    ax.axvline(80, color="#2ecc71", linestyle="--", alpha=0.5)
+    plt.tight_layout(); plt.savefig(path, dpi=150); plt.close()
 
-        # Fig A: Confusion Matrix
-        if len(cm) >= 2:
-            fig, ax = plt.subplots(figsize=(5, 4))
-            tn2, fp2, fn2, tp2 = cm[0][0], cm[0][1], cm[1][0], cm[1][1]
-            cm_arr = [[tp2, fn2], [fp2, tn2]]
-            labels_cm = [["TP", "FN"], ["FP", "TN"]]
-            im = ax.imshow(cm_arr, cmap="Blues")
-            ax.set_xticks([0, 1]); ax.set_yticks([0, 1])
-            ax.set_xticklabels(["Predicted Correct", "Predicted Incorrect"], fontsize=10)
-            ax.set_yticklabels(["Actual Correct", "Actual Incorrect"], fontsize=10)
-            for i in range(2):
-                for j in range(2):
-                    val = cm_arr[i][j]
-                    ax.text(j, i, f"{labels_cm[i][j]}\n{val}",
-                            ha="center", va="center", fontsize=13, fontweight="bold",
-                            color="white" if val > 50 else "black")
-            ax.set_title("QazaqAI — Confusion Matrix (N=151)", fontsize=11, pad=10)
-            plt.colorbar(im, ax=ax)
-            plt.tight_layout()
-            out = os.path.join(os.path.dirname(__file__), "confusion_matrix.png")
-            plt.savefig(out, dpi=200, bbox_inches="tight")
-            plt.close()
-            print(f"  ✓ Saved: confusion_matrix.png")
+def plot_ablation(ablation, path):
+    names = [a["config"] for a in ablation]
+    accs  = [a["mean_accuracy"]*100 for a in ablation]
+    colors = ["#3498db" if "★" not in n and "only" not in n
+              else "#e74c3c" if "only" in n else "#2ecc71" for n in names]
+    fig, ax = plt.subplots(figsize=(10, 4))
+    bars = ax.bar(names, accs, color=colors, edgecolor="white")
+    ax.set_ylabel("CV Accuracy (%)", fontsize=12)
+    ax.set_title("Ablation Study — Feature Configuration Comparison", fontsize=13)
+    ax.set_ylim(0, 105)
+    for bar, val in zip(bars, accs):
+        ax.text(bar.get_x()+bar.get_width()/2, val+0.5, f"{val:.1f}%",
+                ha="center", va="bottom", fontsize=10, fontweight="bold")
+    ax.axhline(80, color="green", linestyle="--", alpha=0.4, label="80% target")
+    plt.xticks(rotation=20, ha="right", fontsize=9)
+    ax.legend(); plt.tight_layout()
+    plt.savefig(path, dpi=150); plt.close()
 
-        # Fig B: Per-topic accuracy bar chart
-        topics_sorted = sorted(topic_accuracy.items(), key=lambda x: x[1]["accuracy"])
-        t_names = [t for t, _ in topics_sorted]
-        t_accs  = [v["accuracy"] * 100 for _, v in topics_sorted]
+def plot_threshold(pairs, vectorizer, path):
+    thresholds = np.arange(0.3, 0.95, 0.05)
+    accs = []
+    for t in thresholds:
+        m = evaluate_pairs(pairs, vectorizer, threshold=t)
+        accs.append(m["accuracy"])
+    best_t = thresholds[int(np.argmax(accs))]
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(thresholds, [a*100 for a in accs], "b-o", markersize=5)
+    ax.axvline(best_t, color="red", linestyle="--", label=f"Best={best_t:.2f}")
+    ax.axvline(THRESHOLD, color="green", linestyle=":", label=f"Used={THRESHOLD}")
+    ax.set_xlabel("Threshold", fontsize=12); ax.set_ylabel("Accuracy (%)", fontsize=12)
+    ax.set_title("Threshold Sensitivity Analysis", fontsize=13)
+    ax.legend(); ax.grid(True, alpha=0.3)
+    plt.tight_layout(); plt.savefig(path, dpi=150); plt.close()
 
-        colors = ["#A32D2D" if a < 50 else "#BA7517" if a < 75 else "#185FA5" if a < 95 else "#1D9E75"
-                  for a in t_accs]
-
-        fig, ax = plt.subplots(figsize=(8, 6))
-        bars = ax.barh(t_names, t_accs, color=colors, height=0.6)
-        ax.axvline(x=77.48, color="#534AB7", linewidth=1.5, linestyle="--", label="Overall (77.48%)")
-        ax.set_xlabel("Accuracy (%)", fontsize=11)
-        ax.set_title("QazaqAI — Per-Topic Accuracy on Test Set", fontsize=12)
-        ax.set_xlim(0, 105)
-        for bar, val in zip(bars, t_accs):
-            ax.text(val + 1, bar.get_y() + bar.get_height()/2,
-                    f"{val:.1f}%", va="center", fontsize=8)
-        ax.legend(fontsize=9)
-        plt.tight_layout()
-        out2 = os.path.join(os.path.dirname(__file__), "per_topic_accuracy.png")
-        plt.savefig(out2, dpi=200, bbox_inches="tight")
-        plt.close()
-        print(f"  ✓ Saved: per_topic_accuracy.png")
-
-        # Fig C: Threshold sensitivity (ROC-style)
-        thresholds = [i/100 for i in range(30, 95, 5)]
-        accs_thr, f1s_thr = [], []
-        from sklearn.metrics import accuracy_score as ac, f1_score as ff
-        y_train_l = list(y_train)
-
-        # Recompute scores once
-        from sklearn.feature_extraction.text import TfidfVectorizer as TV2
-        tv2 = TV2(analyzer="char_wb", ngram_range=(2,4), max_features=10000,
-                  sublinear_tf=True, min_df=1)
-        tv2.fit(X_train)
-        tr2 = tv2.transform(X_train)
-        te2 = tv2.transform(X_test)
-        scores_all = []
-        preds_nn   = []
-        for vec in te2:
-            sims = cs(vec, tr2)[0]
-            best_idx = int(np.argmax(sims))
-            scores_all.append(float(sims[best_idx]))
-            preds_nn.append(y_train_l[best_idx])
-
-        for tau in thresholds:
-            yp = [preds_nn[i] if scores_all[i] >= tau else False for i in range(len(scores_all))]
-            accs_thr.append(ac(list(y_test), yp) * 100)
-            f1s_thr.append(ff(list(y_test), yp, zero_division=0) * 100)
-
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ax.plot([t*100 for t in thresholds], accs_thr, "o-", color="#185FA5", label="Accuracy")
-        ax.plot([t*100 for t in thresholds], f1s_thr,  "s--", color="#1D9E75", label="F1-Score")
-        ax.axvline(x=65, color="#A32D2D", linewidth=1.5, linestyle=":", label="Selected τ=0.65")
-        ax.set_xlabel("Decision threshold τ (%)", fontsize=11)
-        ax.set_ylabel("Score (%)", fontsize=11)
-        ax.set_title("Threshold Sensitivity Analysis", fontsize=12)
-        ax.legend(fontsize=9)
-        ax.grid(True, alpha=0.3)
-        plt.tight_layout()
-        out3 = os.path.join(os.path.dirname(__file__), "threshold_sensitivity.png")
-        plt.savefig(out3, dpi=200, bbox_inches="tight")
-        plt.close()
-        print(f"  ✓ Saved: threshold_sensitivity.png")
-
-    except ImportError:
-        print("  (matplotlib not installed — skipping figures)")
-
-    # ── Финальный отчёт ───────────────────────────────────────────────────────
-    print(f"\n{SEP}")
-    print("  SUMMARY — Copy these numbers into the paper")
-    print(SEP)
-    print(f"\n  TABLE II (Main Model):")
-    print(f"    Accuracy:  {metrics['accuracy']*100:.2f}%")
-    print(f"    Precision: {metrics['precision']*100:.2f}%")
-    print(f"    Recall:    {metrics['recall']*100:.2f}%")
-    print(f"    F1-Score:  {metrics['f1_score']*100:.2f}%")
-    if metrics.get("auc_roc"):
-        print(f"    AUC-ROC:   {metrics['auc_roc']:.4f}")
-
-    print(f"\n  TABLE III (Baseline Comparison):")
-    for r in baseline_results:
-        print(f"    {r['method']:<50} Acc={r['accuracy']*100:.2f}%  F1={r['f1_score']*100:.2f}%")
-
-    print(f"\n  TABLE IV (Ablation — best config marked ★):")
-    for r in ablation_results:
-        star = " ← SELECTED" if "★" in r["config"] else ""
-        print(f"    {r['config']:<50} Acc={r['accuracy']*100:.2f}%  F1={r['f1_score']*100:.2f}%{star}")
-
-    print(f"\n{SEP}")
-    print("  All results saved. Use JSON files to fill paper tables.")
-    print(SEP)
-
-    return metrics
-
-
+# ─── MAIN ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    main()
+    print("=" * 62)
+    print("  QazaqAI — Hybrid TF-IDF Training (v3.1)")
+    print("  char n-gram (3-5) + word n-gram (1-3) | word_weight=0.70")
+    print("=" * 62)
+
+    print("\n[1/6] Деректер жүктелуде...")
+    pairs, qa_knowledge = load_pairs()
+    topics = sorted(set(p.get("topic","?") for p in pairs))
+    print(f"      answer_pairs: {len(pairs)}")
+    print(f"      qa_knowledge: {len(qa_knowledge)}")
+    print(f"      Тақырыптар:   {len(topics)}")
+    print(f"      Threshold:    {THRESHOLD}")
+
+    print("\n[2/6] 5-fold Cross Validation (Hybrid TF-IDF)...")
+    cv = cross_validate(pairs, n_splits=5)
+    print(f"      Accuracy:  {cv['mean_accuracy']:.4f} ± {cv['std_accuracy']:.4f}  ({cv['mean_accuracy']*100:.2f}%)")
+    print(f"      Precision: {cv['mean_precision']:.4f} ± {cv['std_precision']:.4f}")
+    print(f"      Recall:    {cv['mean_recall']:.4f}   ± {cv['std_recall']:.4f}")
+    print(f"      F1-Score:  {cv['mean_f1']:.4f}   ± {cv['std_f1']:.4f}")
+
+    print("\n[3/6] Ablation study (6 конфигурация)...")
+    ablation = ablation_study(pairs)
+    best_cfg = max(ablation, key=lambda x: x["mean_accuracy"])
+    for a in ablation:
+        marker = " ◀ ең жақсы" if a["config"] == best_cfg["config"] else ""
+        print(f"      {a['config']:<28}: {a['mean_accuracy']*100:.2f}%{marker}")
+
+    print("\n[4/6] Baseline салыстыруы...")
+    baseline = baseline_comparison(pairs, cv["mean_accuracy"])
+    print(f"      Random classifier:   {baseline['random_classifier']*100:.2f}%")
+    print(f"      Majority class:      {baseline['majority_class']*100:.2f}%")
+    print(f"      Exact string match:  {baseline['exact_string_match']*100:.2f}%")
+    print(f"      Our Hybrid TF-IDF:   {baseline['our_hybrid_tfidf']*100:.2f}%  ✅")
+
+    print("\n[5/6] Толық модель оқытылуда (барлық деректермен)...")
+    all_texts = []
+    for p in pairs:
+        all_texts.append(normalise(p["correct"]))
+        for w in p.get("incorrect", []):
+            all_texts.append(normalise(w))
+
+    vectorizer = build_vectorizer()
+    vectorizer.fit(all_texts)
+
+    final     = evaluate_pairs(pairs, vectorizer, THRESHOLD)
+    per_topic = compute_per_topic(final["per_pair"])
+
+    print(f"\n      Final Accuracy:  {final['accuracy']:.4f} ({final['accuracy']*100:.2f}%)")
+    print(f"      Final Precision: {final['precision']:.4f} ({final['precision']*100:.2f}%)")
+    print(f"      Final Recall:    {final['recall']:.4f}   ({final['recall']*100:.2f}%)")
+    print(f"      Final F1-Score:  {final['f1']:.4f}   ({final['f1']*100:.2f}%)")
+    print(f"      TP={final['tp']}  TN={final['tn']}  FP={final['fp']}  FN={final['fn']}")
+
+    print(f"\n      {'Тақырып':<24} {'Дәлдік':>8}")
+    print("      " + "─"*34)
+    for t, acc in sorted(per_topic.items(), key=lambda x: x[1]):
+        bar  = "█" * int(acc*20)
+        flag = "✅" if acc>=0.80 else "⚠️" if acc>=0.60 else "❌"
+        print(f"      {t:<24} {acc*100:>6.1f}%  {flag}  {bar}")
+
+    # Сақтау
+    model_data = {
+        "vectorizer":   vectorizer,
+        "pairs":        pairs,
+        "qa_knowledge": qa_knowledge,
+        "threshold":    THRESHOLD,
+        "version":      "3.0-hybrid",
+    }
+    with open(MODEL_PATH, "wb") as f:
+        pickle.dump(model_data, f)
+
+    print("\n[6/6] JSON нәтижелері мен графиктер сақталуда...")
+    eval_out = {
+        "model_version":      "3.0-hybrid",
+        "features":           "char_ngram(3-5) + word_ngram(1-2)",
+        "cross_validation":   cv,
+        "final_metrics":      {k: final[k] for k in ["accuracy","precision","recall","f1","tp","tn","fp","fn"]},
+        "per_topic_accuracy": per_topic,
+        "dataset":            {"total_pairs": len(pairs), "n_topics": len(topics),
+                               "topics": topics, "threshold": THRESHOLD},
+    }
+    for path, data in [
+        (EVAL_PATH,      eval_out),
+        (ABLATION_PATH,  {"ablation_study": ablation}),
+        (BASELINE_PATH,  {"baseline_comparison": baseline}),
+        (PER_TOPIC_PATH, per_topic),
+    ]:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    plot_confusion_matrix(final["tp"], final["tn"], final["fp"], final["fn"], CM_PATH)
+    plot_per_topic(per_topic, PT_PNG)
+    plot_ablation(ablation, TS_PNG)
+    plot_threshold(pairs, vectorizer, TS_PNG.replace(".png","_threshold.png"))
+
+    print("\n" + "="*62)
+    print("  ✅ Барлық файлдар сақталды")
+    print("="*62)
+    print(f"\n  📊 IEEE статьяға — Table 2 (Model Evaluation):")
+    print(f"  ┌{'─'*40}┐")
+    print(f"  │  Metric          Value                    │")
+    print(f"  ├{'─'*40}┤")
+    print(f"  │  CV Accuracy     {cv['mean_accuracy']*100:.2f}% ± {cv['std_accuracy']*100:.2f}%           │")
+    print(f"  │  CV Precision    {cv['mean_precision']*100:.2f}% ± {cv['std_precision']*100:.2f}%           │")
+    print(f"  │  CV Recall       {cv['mean_recall']*100:.2f}% ± {cv['std_recall']*100:.2f}%          │")
+    print(f"  │  CV F1-Score     {cv['mean_f1']*100:.2f}% ± {cv['std_f1']*100:.2f}%           │")
+    print(f"  │  N pairs         {len(pairs)}                        │")
+    print(f"  │  Features        char(3-5) + word(1-2)    │")
+    print(f"  └{'─'*40}┘")
+    print("="*62)

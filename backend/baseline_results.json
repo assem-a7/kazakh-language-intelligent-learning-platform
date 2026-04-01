@@ -1,42 +1,8 @@
-[
-  {
-    "method": "Majority class baseline",
-    "accuracy": 0.6556,
-    "precision": 0.0,
-    "recall": 0.0,
-    "f1_score": 0.0,
-    "latency_ms": 0.001
-  },
-  {
-    "method": "Exact string match",
-    "accuracy": 0.8411,
-    "precision": 1.0,
-    "recall": 0.5385,
-    "f1_score": 0.7,
-    "latency_ms": 0.002
-  },
-  {
-    "method": "Edit distance (Levenshtein, τ=0.70, n=60)",
-    "accuracy": 0.6333,
-    "precision": 0.4815,
-    "recall": 0.619,
-    "f1_score": 0.5417,
-    "latency_ms": 39.45
-  },
-  {
-    "method": "TF-IDF word-level n-gram (1,2)",
-    "accuracy": 0.8344,
-    "precision": 0.9091,
-    "recall": 0.5769,
-    "f1_score": 0.7059,
-    "latency_ms": 1.555
-  },
-  {
-    "method": "QazaqAI TF-IDF char_wb (2,4) [OURS]",
-    "accuracy": 0.7152,
-    "precision": 0.5692,
-    "recall": 0.7115,
-    "f1_score": 0.6325,
-    "latency_ms": 1.556
+{
+  "baseline_comparison": {
+    "random_classifier": 0.5,
+    "majority_class": 0.2033,
+    "exact_string_match": 0.9973,
+    "our_hybrid_tfidf": 0.824
   }
-]
+}

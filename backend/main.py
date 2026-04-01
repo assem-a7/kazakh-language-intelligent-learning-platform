@@ -1,86 +1,64 @@
 """
-main.py — QazaqAI FastAPI backend
+main.py — QazaqAI FastAPI Backend (v3.1)
 Іске қосу: py -3.12 -m uvicorn main:app --reload --port 8000
-
-SETUP: API ключін .env файлына қой:
-  GROQ_API_KEY=gsk_...
-Немесе environment variable ретінде бер:
-  export GROQ_API_KEY=gsk_...
 """
-import os
-import sys
-import json
+import os, json, time, logging
+from dotenv import load_dotenv
+load_dotenv()  # .env файлынан API key оқиды
 from datetime import datetime
 from typing import Optional
 
-sys.path.insert(0, os.path.dirname(__file__))
-
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, field_validator
+from groq import Groq
+
 from model import KazakhAnswerModel
 
-# ─── API KEY — environment variable арқылы ғана ──────────────────────────────
-# .env файлын қолданасың ба? pip install python-dotenv, сонан соң:
-# from dotenv import load_dotenv; load_dotenv()
+# ─── Logging ──────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger("qazaqai")
+
+# ─── Config ───────────────────────────────────────────────────────────────────
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_MODEL   = "llama-3.3-70b-versatile"
+MAX_QUESTION_LEN = 500
+MAX_HISTORY_TURNS = 8   # чат тарихының максимал ұзындығы
 
+# ─── System Prompt ────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """Сен QazaqAI платформасының AI тьюторысың.
-Міндетің: қазақ тілін үйренетін орыс тілді пайдаланушыларға көмектесу.
+Міндетің: қазақ тілін үйренетін пайдаланушыларға ДҰРЫС және НАҚТЫ жауап беру.
 
-МАҢЫЗДЫ ФАКТІЛЕР (дәл осылай жауап бер):
-- Қазақ алфавиті (кириллица): 42 әріп. Арнайы қазақ әріптері: Ә, Ғ, Қ, Ң, Ө, Ү, Ұ, І (8 әріп).
-- Қазақ тілінде 7 септік: атау, ілік, барыс, табыс, жатыс, шығыс, көмектес.
-- Сөз тәртібі: SOV (Бастауыш — Толықтауыш — Баяндауыш). Глагол сөйлем соңында.
-- Қазақ тілі — агглютинативті тіл (суффикстер арқылы).
-- Дыбыс үйлесімі: жуан сөзге жуан жалғау (а,ы,о,у), жіңішке сөзге жіңішке жалғау (е,і,ө,ү).
-- Прилагательное өзгермейді (падеж/число бойынша).
-- Числительнен кейін зат есім жекеше тұрады (бес бала — не балалар).
-- Предлог жоқ — послелоглар қолданылады (үстінде, алдында, артында).
+ҚАТАҢ ЕРЕЖЕЛЕР:
+1. Тек грамматика, сөздік, аударма тақырыптарына жауап бер.
+2. Жауап тілі: пайдаланушы қазақша сұраса — қазақша, орысша сұраса — орысша, аралас болса — екі тілде.
+3. Жауап қысқа, нақты, мысалдармен берілуі керек.
+4. Егер білмесең — "Бұл сұрақ менің мамандығымнан тыс" де, өтірік айтпа.
 
-АУДАРМА ЕРЕЖЕЛЕРІ:
-- Мен = Я, Сен = Ты, Ол = Он/Она, Біз = Мы, Сіз = Вы
-- барамын = иду, келемін = прихожу, оқимын = читаю, жазамын = пишу
-- мектепке = в школу, үйге = домой, Алматыға = в Алматы
-- барды = пошёл, келді = пришёл, оқыды = читал
+НАҚТЫ БІЛІМДЕР (осылай жаз, өзгертпе):
+- Қазақ алфавиті (кириллица): 42 әріп
+- Қазақ алфавиті (латын, 2025+): 32 әріп
+- Септіктер: 7 (атау, ілік, барыс, табыс, жатыс, шығыс, көмектес)
+- Шақтар: 3 (өткен -ды/-ді, осы/келер -ады/-еді, ауыспалы осы шақ -а/-е+жатыр)
+- Сөз тәртібі: SOV (Бастауыш + Толықтауыш + Баяндауыш)
+- Үндестік заңы: жуан (а,о,ұ,ы) немесе жіңішке (ə,е,і,ө,ү) дауыстылар бір сөзде
 
-ЖАУАП ЕРЕЖЕЛЕРІ:
-- Жауапты ҚЫСҚА бер (максимум 4-5 сөйлем)
-- Орысша сұрақ → орысша жауап
-- Қазақша сұрақ → қазақша жауап
-- Аударма сұрақтарына: аударманы + 1 сөйлем түсіндірме
-- Грамматика сұрақтарына: ереже + мысал
-- Emoji қолданба"""
+ЖАУАП ФОРМАТЫ:
+- Қысқа анықтама
+- Мысалдар (кемінде 2)
+- Ереже (қажет болса)
+- Ұзындық: 3-8 сөйлем, артық емес"""
 
-groq_client = None
-
-
-def init_groq(api_key: str):
-    global groq_client
-    if not api_key:
-        print("[startup] GROQ_API_KEY орнатылмаған — TF-IDF қолданылады")
-        return False
-    try:
-        from groq import Groq
-        client = Groq(api_key=api_key)
-        client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": "hi"}],
-            max_tokens=5,
-        )
-        groq_client = client
-        print("[startup] Groq AI дайын ✓")
-        return True
-    except ImportError:
-        print("[startup] groq пакеті жоқ: pip install groq")
-        return False
-    except Exception as e:
-        print(f"[startup] Groq қосылмады: {e} — TF-IDF қолданылады")
-        return False
-
-
-# ─── App ──────────────────────────────────────────────────────────────────────
-app = FastAPI(title="QazaqAI Backend", version="3.1.0")
+# ─── FastAPI app ──────────────────────────────────────────────────────────────
+app = FastAPI(
+    title="QazaqAI Backend",
+    description="Қазақ тілін үйренуге арналған AI платформасы",
+    version="3.1.0",
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -89,133 +67,243 @@ app.add_middleware(
         "http://localhost:4173",
         "http://127.0.0.1:5173",
     ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ─── Модель жүктеу ────────────────────────────────────────────────────────────
-DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "qa_pairs.json")
-model = KazakhAnswerModel()
+# ─── Rate limiting (қарапайым) ────────────────────────────────────────────────
+_rate_store: dict = {}
 
-if not model.is_trained:
-    print("[startup] Модель оқытылуда...")
-    model.train(DATA_PATH)
+def check_rate_limit(ip: str, limit: int = 30, window: int = 60) -> bool:
+    """IP бойынша rate limiting: 30 сұраным / 60 сек."""
+    now = time.time()
+    if ip not in _rate_store:
+        _rate_store[ip] = []
+    # Ескі жазбаларды тазалау
+    _rate_store[ip] = [t for t in _rate_store[ip] if now - t < window]
+    if len(_rate_store[ip]) >= limit:
+        return False
+    _rate_store[ip].append(now)
+    return True
 
-init_groq(GROQ_API_KEY)
+# ─── Startup ──────────────────────────────────────────────────────────────────
+@app.on_event("startup")
+async def startup_event():
+    """Сервер іске қосылғанда модельді жүктейді."""
+    try:
+        model = KazakhAnswerModel.get_instance()
+        logger.info(f"✅ Модель жүктелді: {model.version}")
+        logger.info(f"   Pairs: {len(model.pairs)}, QA: {len(model.qa_knowledge)}")
+        logger.info(f"   Threshold: {model.threshold}")
+    except Exception as e:
+        logger.error(f"❌ Модель жүктелмеді: {e}")
 
-session_log    = []
-prediction_log = []
-
-
-# ─── Схемалар ─────────────────────────────────────────────────────────────────
+# ─── Pydantic schemas ─────────────────────────────────────────────────────────
 class CheckAnswerRequest(BaseModel):
     user_answer:    str
     correct_answer: str
     sentence_id:    Optional[int] = None
     topic:          Optional[str] = None
 
+    @field_validator("user_answer", "correct_answer")
+    @classmethod
+    def not_empty(cls, v):
+        v = v.strip()
+        if not v:
+            raise ValueError("Жауап бос болмауы керек")
+        if len(v) > MAX_QUESTION_LEN:
+            raise ValueError(f"Жауап {MAX_QUESTION_LEN} символдан аспауы керек")
+        return v
 
-class AskTutorRequest(BaseModel):
+class TutorMessage(BaseModel):
+    role:    str   # "user" | "assistant"
+    content: str
+
+class TutorRequest(BaseModel):
     question: str
-    context:  Optional[str] = ""
+    history:  Optional[list[TutorMessage]] = []
 
+    @field_validator("question")
+    @classmethod
+    def not_empty(cls, v):
+        v = v.strip()
+        if not v:
+            raise ValueError("Сұрақ бос болмауы керек")
+        if len(v) > MAX_QUESTION_LEN:
+            raise ValueError(f"Сұрақ {MAX_QUESTION_LEN} символдан аспауы керек")
+        return v
 
-class LogSessionRequest(BaseModel):
-    participant_id: str
+class SessionLog(BaseModel):
+    participant_id: Optional[str] = "anonymous"
+    topic:          Optional[str] = None
     attempts:       list
 
+# ─── Эндпойнттар ─────────────────────────────────────────────────────────────
 
-# ─── Эндпойнттар ──────────────────────────────────────────────────────────────
 @app.get("/api/health")
-def health():
-    return {
-        "status":       "ok",
-        "model_loaded": model.is_trained,
-        "groq_ready":   groq_client is not None,
-        "timestamp":    datetime.utcnow().isoformat(),
-    }
-
-
-@app.post("/api/ask-tutor")
-def ask_tutor(req: AskTutorRequest):
-    if not req.question.strip():
-        raise HTTPException(status_code=400, detail="question бос болмауы керек")
-
-    if groq_client is not None:
-        try:
-            prompt = req.question
-            if req.context:
-                prompt = f"Контекст: {req.context}\n\nСұрақ: {req.question}"
-
-            response = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user",   "content": prompt},
-                ],
-                max_tokens=400,
-                temperature=0.3,
-            )
-            return {
-                "answer":     response.choices[0].message.content.strip(),
-                "confidence": 1.0,
-                "source":     "groq",
-            }
-        except Exception as e:
-            print(f"[groq] Қате: {e}")
-
-    result = model.get_answer(req.question, req.context or "")
-    return {
-        "answer":     result["answer"],
-        "confidence": result["confidence"],
-        "source":     "tfidf",
-    }
+async def health():
+    """Сервер күйін тексеру."""
+    try:
+        model = KazakhAnswerModel.get_instance()
+        return {
+            "status":       "ok",
+            "model_loaded": model._loaded,
+            "version":      model.version,
+            "pairs":        len(model.pairs),
+            "threshold":    model.threshold,
+            "timestamp":    datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        return JSONResponse(status_code=503, content={"status": "error", "detail": str(e)})
 
 
 @app.post("/api/check-answer")
-def check_answer(req: CheckAnswerRequest):
-    if not req.user_answer.strip():
-        raise HTTPException(status_code=400, detail="user_answer бос болмауы керек")
-    result = model.check_answer(req.user_answer, req.correct_answer)
-    prediction_log.append({
-        "topic":      req.topic,
-        "is_correct": result["is_correct"],
-        "score":      result["score"],
-        "timestamp":  datetime.utcnow().isoformat(),
-    })
-    return result
+async def check_answer(req: CheckAnswerRequest, request: Request):
+    """
+    Пайдаланушы жауабын тексереді.
+    TF-IDF cosine similarity арқылы дұрыс/қате анықтайды.
+    """
+    ip = request.client.host
+    if not check_rate_limit(ip):
+        raise HTTPException(status_code=429, detail="Тым көп сұраным. 1 минут күтіңіз.")
+
+    try:
+        model  = KazakhAnswerModel.get_instance()
+        result = model.check_answer(req.user_answer, req.correct_answer)
+        logger.info(
+            f"check-answer | topic={req.topic} | "
+            f"score={result['score']:.2f} | correct={result['is_correct']}"
+        )
+        return {
+            **result,
+            "sentence_id": req.sentence_id,
+            "topic":       req.topic,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        logger.error(f"check-answer error: {e}")
+        raise HTTPException(status_code=500, detail="Сервер қатесі. Кейінірек қайталаңыз.")
 
 
-@app.post("/api/verify")
-def verify_answer(req: CheckAnswerRequest):
-    return check_answer(req)
+@app.post("/api/ask-tutor")
+async def ask_tutor(req: TutorRequest, request: Request):
+    """
+    AI тьюторға сұрақ қою.
+    1) TF-IDF базасынан іздейді (жылдам, тегін)
+    2) Табылмаса → Groq (Llama) арқылы жауап береді
+    """
+    ip = request.client.host
+    if not check_rate_limit(ip, limit=20):
+        raise HTTPException(status_code=429, detail="Тым көп сұраным. 1 минут күтіңіз.")
+
+    try:
+        model = KazakhAnswerModel.get_instance()
+
+        # 1) TF-IDF базасынан іздеу
+        local_result = model.get_answer(req.question)
+
+        if local_result["found"] and local_result["confidence"] >= 0.35:
+            logger.info(f"ask-tutor | source=local | conf={local_result['confidence']:.2f}")
+            return {
+                "answer":     local_result["answer"],
+                "confidence": local_result["confidence"],
+                "source":     "local",
+                "topic":      local_result["topic"],
+            }
+
+        # 2) Groq-қа жіберу
+        if not GROQ_API_KEY:
+            # Groq жоқ болса — local нәтижені қайтар
+            return {
+                "answer":     local_result["answer"],
+                "confidence": local_result["confidence"],
+                "source":     "local_fallback",
+                "topic":      "not_found",
+            }
+
+        client = Groq(api_key=GROQ_API_KEY)
+
+        # Чат тарихын дайындау (максимал MAX_HISTORY_TURNS)
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        history  = req.history or []
+        for msg in history[-MAX_HISTORY_TURNS:]:
+            if msg.role in ("user", "assistant"):
+                messages.append({"role": msg.role, "content": msg.content[:500]})
+        messages.append({"role": "user", "content": req.question})
+
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=messages,
+            max_tokens=400,
+            temperature=0.3,
+        )
+        answer = response.choices[0].message.content.strip()
+
+        logger.info(f"ask-tutor | source=groq | tokens={response.usage.total_tokens}")
+        return {
+            "answer":     answer,
+            "confidence": 0.90,
+            "source":     "groq",
+            "topic":      "ai_generated",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"ask-tutor error: {e}")
+        raise HTTPException(status_code=500, detail="AI тьютор қолжетімсіз. Кейінірек қайталаңыз.")
 
 
 @app.get("/api/model-stats")
-def model_stats():
-    stats = model.get_stats()
-    return {
-        **stats,
-        "groq_ready":          groq_client is not None,
-        "total_predictions":   len(prediction_log),
-        "correct_predictions": sum(1 for p in prediction_log if p["is_correct"]),
-    }
+async def model_stats():
+    """Модель метрикаларын қайтарады (IEEE статья үшін)."""
+    try:
+        model = KazakhAnswerModel.get_instance()
+        return model.get_stats()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/log-session")
-def log_session(req: LogSessionRequest):
-    correct  = sum(1 for a in req.attempts if a.get("correct"))
-    total    = len(req.attempts)
-    accuracy = correct / total if total > 0 else 0
-    entry = {
-        "participant_id": req.participant_id,
-        "timestamp":      datetime.utcnow().isoformat(),
-        "attempts_count": total,
-        "correct_count":  correct,
-        "accuracy":       round(accuracy, 4),
-    }
-    session_log.append(entry)
-    log_path = os.path.join(os.path.dirname(__file__), "sessions.jsonl")
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    return {"saved": True}
+async def log_session(req: SessionLog):
+    """Пайдаланушы сессиясын сақтайды."""
+    try:
+        log_dir  = os.path.join(os.path.dirname(__file__), "logs")
+        os.makedirs(log_dir, exist_ok=True)
+
+        filename = os.path.join(log_dir, f"session_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json")
+        payload  = {
+            "participant_id": req.participant_id,
+            "topic":          req.topic,
+            "timestamp":      datetime.utcnow().isoformat(),
+            "n_attempts":     len(req.attempts),
+            "attempts":       req.attempts,
+        }
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+        # Жылдам статистика
+        correct = sum(1 for a in req.attempts if a.get("is_correct"))
+        return {
+            "saved":       True,
+            "filename":    os.path.basename(filename),
+            "n_attempts":  len(req.attempts),
+            "n_correct":   correct,
+            "accuracy":    round(correct / len(req.attempts), 4) if req.attempts else 0,
+        }
+    except Exception as e:
+        logger.error(f"log-session error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/topics")
+async def get_topics():
+    """Барлық тақырыптар тізімін қайтарады."""
+    try:
+        model  = KazakhAnswerModel.get_instance()
+        topics = sorted(set(p.get("topic", "unknown") for p in model.pairs))
+        return {"topics": topics, "count": len(topics)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

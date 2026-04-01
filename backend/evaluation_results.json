@@ -1,27 +1,109 @@
 {
-  "model": "TF-IDF + cosine similarity",
-  "vectorizer": "char_wb n-gram (2,4)",
-  "threshold": 0.65,
-  "language": "Kazakh",
-  "metrics": {
-    "accuracy": 0.7152,
-    "precision": 0.5692,
-    "recall": 0.7115,
-    "f1_score": 0.6325,
-    "auc_roc": 0.7923,
-    "confusion_matrix": [
-      [
-        71,
-        28
-      ],
-      [
-        15,
-        37
-      ]
+  "model_version": "3.0-hybrid",
+  "features": "char_ngram(3-5) + word_ngram(1-2)",
+  "cross_validation": {
+    "fold_results": [
+      {
+        "fold": 1,
+        "n_test": 74,
+        "accuracy": 0.7922,
+        "precision": 0.4966,
+        "recall": 1.0,
+        "f1": 0.6637
+      },
+      {
+        "fold": 2,
+        "n_test": 74,
+        "accuracy": 0.812,
+        "precision": 0.5175,
+        "recall": 1.0,
+        "f1": 0.682
+      },
+      {
+        "fold": 3,
+        "n_test": 74,
+        "accuracy": 0.8804,
+        "precision": 0.6271,
+        "recall": 1.0,
+        "f1": 0.7708
+      },
+      {
+        "fold": 4,
+        "n_test": 74,
+        "accuracy": 0.8402,
+        "precision": 0.5606,
+        "recall": 1.0,
+        "f1": 0.7184
+      },
+      {
+        "fold": 5,
+        "n_test": 74,
+        "accuracy": 0.795,
+        "precision": 0.5,
+        "recall": 1.0,
+        "f1": 0.6667
+      }
     ],
-    "n_train": 603,
-    "n_test": 151,
-    "n_total": 754,
-    "threshold": 0.65
+    "mean_accuracy": 0.824,
+    "std_accuracy": 0.033,
+    "mean_precision": 0.5404,
+    "std_precision": 0.049,
+    "mean_recall": 1.0,
+    "std_recall": 0.0,
+    "mean_f1": 0.7003,
+    "std_f1": 0.0403
+  },
+  "final_metrics": {
+    "accuracy": 0.9687,
+    "precision": 0.8665,
+    "recall": 1.0,
+    "f1": 0.9285,
+    "tp": 370,
+    "tn": 1393,
+    "fp": 57,
+    "fn": 0
+  },
+  "per_topic_accuracy": {
+    "accusative": 1.0,
+    "word_order": 0.7417,
+    "ablative": 1.0,
+    "vowel_harmony": 0.976,
+    "dative": 1.0,
+    "locative": 1.0,
+    "present_tense": 1.0,
+    "past_tense": 1.0,
+    "future_tense": 1.0,
+    "plural": 0.99,
+    "genitive": 1.0,
+    "instrumental": 1.0,
+    "negation": 1.0,
+    "possessive": 1.0,
+    "adjective": 0.8,
+    "question": 0.9333,
+    "numerals": 0.98
+  },
+  "dataset": {
+    "total_pairs": 370,
+    "n_topics": 17,
+    "topics": [
+      "ablative",
+      "accusative",
+      "adjective",
+      "dative",
+      "future_tense",
+      "genitive",
+      "instrumental",
+      "locative",
+      "negation",
+      "numerals",
+      "past_tense",
+      "plural",
+      "possessive",
+      "present_tense",
+      "question",
+      "vowel_harmony",
+      "word_order"
+    ],
+    "threshold": 0.55
   }
 }
